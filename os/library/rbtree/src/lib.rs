@@ -379,21 +379,22 @@ impl<K: Ord + Debug, V: Debug> RBTree<K, V> {
         if node.is_null() {
             return;
         }
+        /*
         if direction == 0 {
             unsafe {
-                // println!("'{:?}' is root node", (*node.0));
-            }
+                println!("'{:?}' is root node", (*node.0));
+        }
         } else {
             let direct = if direction == -1 { "left" } else { "right" };
             unsafe {
-                // println!(
-                //     "{:?} is {:?}'s {:?} child ",
-                //     (*node.0),
-                //     *node.parent().0,
-                //     direct
-                // );
+                println!(
+                    "{:?} is {:?}'s {:?} child ",
+                    (*node.0),
+                    *node.parent().0,
+                    direct
+                );
             }
-        }
+        }*/
         self.tree_print(node.left(), -1);
         self.tree_print(node.right(), 1);
     }
