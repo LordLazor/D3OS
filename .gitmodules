@@ -1,0 +1,3 @@
+[submodule "os/library/rbtree"]
+	path = os/library/rbtree
+	url = git@github.com:LordLazor/rbtree.git
