@@ -7,6 +7,8 @@
    ║ Author: Fabian Ruhland, HHU                                             ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
+#![feature(naked_functions)] // New
+
 #![feature(allocator_api)]
 #![feature(alloc_layout_extra)]
 #![feature(exact_size_is_empty)]

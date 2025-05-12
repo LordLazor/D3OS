@@ -116,7 +116,7 @@ impl SyscallTable {
 unsafe impl Send for SyscallTable {}
 unsafe impl Sync for SyscallTable {}
 
-#[unsafe(naked)]
+#[naked] // Changed
 ///
 /// Description: \
 ///    This function does not take any parameters per its declaration,
@@ -196,7 +196,7 @@ unsafe extern "C" fn syscall_handler() {
     );
 }
 
-#[unsafe(naked)]
+#[naked] // Changed
 #[unsafe(no_mangle)]
 unsafe extern "C" fn syscall_disp() {
     naked_asm!(

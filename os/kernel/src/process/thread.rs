@@ -542,7 +542,7 @@ impl Thread {
 }
 
 /// Low-level function for starting a thread in kernel mode
-#[unsafe(naked)]
+#[naked] // Changed
 unsafe extern "C" fn thread_kernel_start(old_rsp0: u64) {
     naked_asm!(
         "mov rsp, rdi", // First parameter -> load 'old_rsp0'
@@ -568,7 +568,7 @@ unsafe extern "C" fn thread_kernel_start(old_rsp0: u64) {
 }
 
 /// Low-level function for starting a thread in user mode
-#[unsafe(naked)]
+#[naked] // Changed
 #[allow(improper_ctypes_definitions)] // 'entry' takes no arguments and has no return value, so we just assume that the "C" and "Rust" ABIs act the same way in this case
 unsafe extern "C" fn thread_user_start(old_rsp0: u64, entry: fn()) {
     naked_asm!(
@@ -579,7 +579,7 @@ unsafe extern "C" fn thread_user_start(old_rsp0: u64, entry: fn()) {
 }
 
 /// Low-level thread switching function
-#[unsafe(naked)]
+#[naked] // Changed
 unsafe extern "C" fn thread_switch(current_rsp0: *mut u64, next_rsp0: u64, next_rsp0_end: u64, next_cr3: u64) {
     naked_asm!(
     // Save registers of current thread
