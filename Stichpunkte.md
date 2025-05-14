@@ -19,6 +19,7 @@
 * Thread wechseln, sobald ein Thread mit niedrigerer virtual runtime vorliegt
 
 ### Vortrag:
+* D3OS kurz vorstellen
 * CFS vorstellen
 	* Was macht ihn so besonders?
 	* Wieso verwendet Linux ihn? 
