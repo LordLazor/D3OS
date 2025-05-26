@@ -18,6 +18,8 @@ use core::marker;
 use core::mem;
 use core::ops::Index;
 
+
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum Color {
     Red,
@@ -1821,5 +1823,17 @@ mod tests {
             cache.push(e.0.clone());
         }
         assert_eq!(&cache, &vec![3, 2, 1]);
+    }
+
+    // Eigener Test, um auszuprobieren, für CFS
+    #[test]
+    fn test_get_min_max() {
+        let mut m = RBTree::new();
+        m.insert(1, 2);
+        m.insert(2, 3);
+        m.insert(3, 4);
+        
+        assert_eq!(m.get_last(), Some((&3, &4)));
+        assert_eq!(m.get_first(), Some((&1, &2)));
     }
 }
