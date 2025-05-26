@@ -11,11 +11,14 @@ use crate::{allocator, apic, scheduler, timer, tss};
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use rbtree::RBTree;
+
 use core::ptr;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::Relaxed;
 use smallmap::Map;
 use spin::{Mutex, MutexGuard};
+use crate::syscall::sys_time::sys_get_system_time;
 
 // thread IDs
 static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -378,5 +381,209 @@ impl Scheduler {
                 self.switch_thread_no_interrupt();
             }
         }
+    }
+
+
+
+}
+
+/* 
+Lazar Konstantinou:
+Wrapper around each thread that is scheduled by the cfs scheduler 
+which additionally stores scheduling parameters
+*/
+pub struct SchedulingEntity {
+    vruntime: usize,
+    weight: usize,
+    nice: usize,
+    last_exec_time: usize,
+    thread: Rc<Thread>,
+}
+
+impl SchedulingEntity {
+
+    /*
+        Lazar Konstantinou:
+        Creates a new SchedulingEntity instance for a given thread    
+     */
+    pub fn new(thread: Rc<Thread>) -> Self {
+        // current system time in nanoseconds
+        let current_time = timer().systime_ns();
+        
+        Self {
+            vruntime: 0,
+            weight: 0,
+            nice: 0 as usize,
+            last_exec_time: current_time,
+            thread,
+        }
+    }
+
+    /*
+        Lazar Konstantinou:
+        Returns the current virtual runtime of the scheduling entity
+    */
+    pub fn vruntime(&self) -> usize {
+        self.vruntime
+    }
+
+    /*
+        Lazar Konstantinou:
+        Returns the current scheduling entity so there are no issues with borrowing 
+    */
+    pub fn thread(&self) -> Rc<Thread> {
+        Rc::clone(&self.thread)
+    }
+}
+
+pub struct CfsScheduler {
+    // Red-Black-Tree (z. B. via BTreeMap, echte RBT-Implementierungen sind ebenfalls möglich)
+    cfs_tree: Mutex<RBTree<usize, Rc<SchedulingEntity>>>,
+
+    // Aktuell laufende Scheduling-Entity (nicht im run_queue enthalten)
+    current: Mutex<Option<Rc<SchedulingEntity>>>,
+
+    // Globale Zeitscheibensteuerung
+    // scheduling_latency: usize,
+    // min_granularity: usize,
+
+    // Time Zeitpunkt der letzten Aktualisierung (z. B. für `exec_start`)
+    //last_update_time: usize,
+
+}
+
+impl CfsScheduler {
+    /* 
+        Lazar Konstantinou:
+        Merged from the Linux kernel 2.6.24
+    */
+    const MAX_RT_PRIO: i32 = 100;
+    pub const fn nice_to_prio(nice: i32) -> i32 {
+        CfsScheduler::MAX_RT_PRIO + nice + 20
+    }
+    pub const fn prio_to_nice(prio: i32) -> i32 {
+        prio - CfsScheduler::MAX_RT_PRIO - 20
+    }
+    pub const PRIO_TO_WEIGHT: [u32; 40] = [
+        88761, 71755, 56483, 46273, 36291,
+        29154, 23254, 18705, 14949, 11916,
+        9548,  7620,  6100,  4904,  3906,
+        3121,  2501,  1991,  1586,  1277,
+        1024,   820,   655,   526,   423,
+        335,   272,   215,   172,   137,
+        110,    87,    70,    56,    45,
+        36,    29,    23,    18,    15,
+    ];
+    pub fn nice_to_weight(nice: i32) -> u32 {
+        let idx = (nice + 20).clamp(0, 39) as usize;
+        CfsScheduler::PRIO_TO_WEIGHT[idx]
+    }
+    pub const PRIO_TO_WMULT: [u32; 40] = [
+        48388, 59856, 76040, 92818, 118348,
+        147320, 184698, 229616, 287308, 360437,
+        449829, 563644, 704093, 875809, 1099582,
+        1376151, 1717300, 2157191, 2708050, 3363326,
+        4194304, 5237765, 6557202, 8165337, 10153587,
+        12820798, 15790321, 19976592, 24970740, 31350126,
+        39045157, 49367440, 61356676, 76695844, 95443717,
+        119304647, 148102320, 186737708, 238609294, 286331153,
+    ];
+
+    /* 
+        Lazar Konstantinou:
+        Creates a new CfsScheduler instance
+        Initializes the rbtree and sets the current scheduling entity to None
+    */
+    pub fn new() -> Self {
+        Self {
+            cfs_tree: Mutex::new(RBTree::new()),
+            current: Mutex::new(None),
+        }
+    }
+
+    /*
+        Lazar Konstantinou:
+        Puts a scheduling entity into the rbtree
+    */
+    pub fn ready(&mut self, entity: Rc<SchedulingEntity>) {
+        // Insert the scheduling entity into the rbtree
+        let mut cfs_tree = self.cfs_tree.lock();
+
+        let entity = Rc::clone(&entity);
+        let vruntime = entity.vruntime();
+
+        // Insert into the rbtree based on vruntime
+        cfs_tree.insert(vruntime, entity);
+    }
+
+    /*
+        Lazar Konstantinou:
+        Take the current element on the rbtree
+    */
+    pub fn current(&self) -> Option<Rc<SchedulingEntity>> {
+        let current = self.current.lock();
+        current.as_ref().map(Rc::clone)
+    }
+
+    /*
+        Lazar Konstantinou:
+        Starts the cfs scheduler by taking the first element from rbtree
+        and starting the thread associated with it.
+    */
+    pub fn start(&mut self) {
+        // Start the scheduler by taking the first element from the rbtree
+        let mut cfs_tree = self.cfs_tree.lock();
+        if let Some((_, entity)) = cfs_tree.pop_first() {
+            *self.current.lock() = Some(Rc::clone(&entity));
+
+            unsafe {
+                // Start the first thread
+                Thread::start_first(entity.thread().as_ref());
+            }
+        } else {
+            panic!("No scheduling entity available to start!");
+        }
+    }
+
+    /* 
+        Lazar Konstantinou:
+        Switches the current thread to the next one in the rbtree
+        and updates the current scheduling entity.
+    */
+    pub fn switch_thread(&mut self) {
+        let mut cfs_tree = self.cfs_tree.lock();
+        let mut current = self.current.lock();
+
+        // If there is no current thread, we cannot switch
+        if current.is_none() {
+            return;
+        }
+
+        // Get the current scheduling entity and remove it from the rbtree
+        let current_entity = current.as_ref().unwrap();
+        cfs_tree.remove(&current_entity.vruntime());
+
+        // Get the next entity from the rbtree
+        if let Some((_, next_entity)) = cfs_tree.pop_first() {
+            *self.current.lock() = Some(Rc::clone(&next_entity));
+
+            unsafe {
+                // Switch to the next thread
+                Thread::switch(
+                    ptr::from_ref(current_entity.thread().as_ref()),
+                    ptr::from_ref(next_entity.thread().as_ref()),
+                );
+            }
+        } else {
+            // No more entities in the rbtree
+            *current = None;
+        }
+    }
+
+    // Lazar:
+    // Updated die virtual Runtime des aktuellen Threads indem:
+    // (deltaExecTime × NICE_0_WEIGHT)/weight_schedule_entity
+    fn update_current(&self) {
+        todo!()
     }
 }
