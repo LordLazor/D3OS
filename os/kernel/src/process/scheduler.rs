@@ -628,6 +628,34 @@ impl CfsScheduler {
     // Updated die virtual Runtime des aktuellen Threads indem:
     // (deltaExecTime × NICE_0_WEIGHT)/weight_schedule_entity
     fn update_current(&self) {
-        todo!()
+        let now = timer().systime_ns(); // Aktuelle Zeit in Nanosekunden
+        let mut current_lock = self.current.lock();
+
+        let Some(current_entity) = current_lock.as_mut() else {
+            return; // Wenn kein Thread aktiv ist, gibt es nichts zu aktualisieren
+        };
+
+        let mut_entity = Rc::get_mut(current_entity) //Muss der alleinige Zugriff auf den aktuellen Thread sein
+            .expect("update_current: SchedulingEntity ist mehrfach geteilt!");
+
+        let delta_exec = now.saturating_sub(mut_entity.last_exec_time); //Subtraktion, schließt jedoch negative Werte aus (z.B. 200 - 300 = 0)
+
+        if delta_exec == 0 {
+            return; // Keine Ausführungszeit vergangen, somit nichts zu aktualisieren
+        }
+
+        const NICE_0_LOAD: usize = 1024; // Standardwert
+
+        let weight = if mut_entity.weight == 0 { // Wenn der Thread kein Gewicht hat, nehme NICE_0_LOAD um eine Division durch 0 zu verhindern
+            NICE_0_LOAD
+        } else {
+            mut_entity.weight
+        };
+
+        let weighted_delta = delta_exec * NICE_0_LOAD / weight;
+
+        mut_entity.vruntime += weighted_delta;
+
+        mut_entity.last_exec_time = now;
     }
 }
