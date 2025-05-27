@@ -38,6 +38,7 @@ use crate::syscall::syscall_dispatcher::CoreLocalStorage;
 use ::log::{Level, Log, Record, error};
 use acpi::AcpiTables;
 use alloc::sync::Arc;
+use process::scheduler::CfsScheduler;
 use core::fmt::Arguments;
 use core::panic::PanicInfo;
 use multiboot2::ModuleTag;
@@ -64,6 +65,7 @@ pub mod network;
 pub mod process;
 pub mod storage;
 pub mod syscall;
+pub mod user;
 
 pub mod built_info {
     // The file has been placed there by the build script.
@@ -232,6 +234,14 @@ static SCHEDULER: Once<Scheduler> = Once::new();
 pub fn scheduler() -> &'static Scheduler {
     SCHEDULER.call_once(|| Scheduler::new());
     SCHEDULER.get().unwrap()
+}
+
+// CfsScheduler.
+static CFS_SCHEDULER: Once<CfsScheduler> = Once::new();
+
+pub fn cfs_scheduler() -> &'static CfsScheduler {
+    CFS_SCHEDULER.call_once(|| CfsScheduler::new());
+    CFS_SCHEDULER.get().unwrap()
 }
 
 /// Interrupt Dispatcher.
