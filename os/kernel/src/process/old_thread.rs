@@ -91,15 +91,12 @@ impl Thread {
     /// `entry` is the thread entry function.
     pub fn new_kernel_thread(entry: fn(), tag_str: &str) -> Rc<Thread> {
         // alocate frames for kernel stack
-        info!("Initializing kernel thread with tag: {}", tag_str);
-
         let kernel_stack = Vec::<u64, StackAllocator>::with_capacity_in(
             (KERNEL_STACK_PAGES * PAGE_SIZE) / 8,
             StackAllocator::default(),
         );
 
         // add kernel stack to the virtual address space
-        
         process_manager()
             .read()
             .current_process()
@@ -113,21 +110,6 @@ impl Thread {
                 },
                 tag_str,
             );
-        
-        /* Lazar Konstantinou: War nur fürs Debuggen
-        let pm = process_manager();
-        let pm_read = pm.read();
-        let pm_current_process = pm_read.current_process();
-        let pm_virtual_address_space = pm_current_process.virtual_address_space.map_kernel_stack(
-            PageRange {
-                start: Page::from_start_address(VirtAddr::new(kernel_stack.as_ptr() as u64)).unwrap(),
-                end: Page::from_start_address(VirtAddr::new(
-                    kernel_stack.as_ptr() as u64 + kernel_stack.capacity() as u64 * 8,
-                )).unwrap(),
-            },
-            tag_str,
-        );
-        */
 
         // empty user stack, so need to add it to the virtual address space
         let user_stack = Vec::with_capacity_in(0, StackAllocator::default()); // Dummy stack
