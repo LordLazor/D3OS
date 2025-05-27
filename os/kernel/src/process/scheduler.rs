@@ -405,17 +405,19 @@ impl SchedulingEntity {
 
     
     /*
-        Lazar Konstantinou:
+        Lazar Konstantinou und David:
         Creates a new SchedulingEntity instance for a given thread    
      */
     pub fn new(thread: Rc<Thread>) -> Self {
         // current system time in nanoseconds
         let current_time = timer().systime_ns();
         let vruntime = GLOBAL_VRUNTIME_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nice = 0; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
+        let weight = CfsScheduler::nice_to_weight(nice) as usize;
         Self {
             vruntime: vruntime,
-            weight: 0,
-            nice: 0 as usize,
+            weight: weight,
+            nice: nice as usize,
             last_exec_time: current_time,
             thread,
         }
@@ -481,7 +483,7 @@ impl CfsScheduler {
         36,    29,    23,    18,    15,
     ];
     pub fn nice_to_weight(nice: i32) -> u32 {
-        let idx = (nice + 20).clamp(0, 39) as usize;
+        let idx = (nice + 20).clamp(0, 39) as usize; //Wandelt nice Wert in das passendes Gewicht um, indem er den korrekten Index aus dem Array aufruft, -20 ist Index 0, 19 ist Index 39...
         CfsScheduler::PRIO_TO_WEIGHT[idx]
     }
     pub const PRIO_TO_WMULT: [u32; 40] = [
@@ -671,12 +673,8 @@ impl CfsScheduler {
         }
 
         const NICE_0_LOAD: usize = 1024; // Standardwert
-
-        let weight = if mut_entity.weight == 0 { // Wenn der Thread kein Gewicht hat, nehme NICE_0_LOAD um eine Division durch 0 zu verhindern
-            NICE_0_LOAD
-        } else {
-            mut_entity.weight
-        };
+        
+        let weight = mut_entity.weight;
 
         let weighted_delta = delta_exec * NICE_0_LOAD / weight;
 
