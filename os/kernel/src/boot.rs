@@ -19,6 +19,7 @@ use crate::memory::{MemorySpace, PAGE_SIZE, nvmem};
 use crate::network::rtl8139;
 use crate::process::thread::Thread;
 use crate::syscall::syscall_dispatcher;
+use crate::user::scheduler_demo::spawn_demo_thread;
 use crate::{
     acpi_tables, allocator, apic, built_info, gdt, init_acpi_tables, init_apic, init_initrd,
     init_pci, init_serial_port, init_terminal, initrd, keyboard, logger, memory, network,
@@ -325,6 +326,8 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
         .expect("Initrd not found!");
     init_initrd(initrd_tag);
 
+    spawn_demo_thread();
+
     // Create and register the cleanup thread in the scheduler
     // (If the last thread of a process terminates, it cannot delete its own address space)
     scheduler().ready(Thread::new_kernel_thread(
@@ -366,14 +369,26 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
         bootloader_name
     );
 
+
+
+
     // Dump information about all processes (including VMAs) 
     process_manager().read().dump();
 
     // Start APIC timer & scheduler
-    info!("Starting scheduler");
+
     apic().start_timer(10);
 
+
+    info!("Starting scheduler");
+
+
     scheduler().start();
+
+    
+    
+    
+
 }
 
 /// Set up the GDT
