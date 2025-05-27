@@ -11,10 +11,11 @@ use crate::{allocator, apic, scheduler, timer, tss};
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use log::info;
 use rbtree::RBTree;
 
 use core::ptr;
-use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use core::sync::atomic::Ordering::Relaxed;
 use smallmap::Map;
 use spin::{Mutex, MutexGuard};
@@ -398,11 +399,11 @@ pub struct SchedulingEntity {
     last_exec_time: usize,
     thread: Rc<Thread>,
 }
+static GLOBAL_VRUNTIME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 impl SchedulingEntity {
 
     
-
     /*
         Lazar Konstantinou:
         Creates a new SchedulingEntity instance for a given thread    
@@ -410,9 +411,9 @@ impl SchedulingEntity {
     pub fn new(thread: Rc<Thread>) -> Self {
         // current system time in nanoseconds
         let current_time = timer().systime_ns();
-        
+        let vruntime = GLOBAL_VRUNTIME_COUNTER.fetch_add(1, Ordering::Relaxed);
         Self {
-            vruntime: 0,
+            vruntime: vruntime,
             weight: 0,
             nice: 0 as usize,
             last_exec_time: current_time,
@@ -591,37 +592,34 @@ impl CfsScheduler {
     */
     pub fn kill(&self, thread_id: usize) {
         let mut cfs_tree = self.cfs_tree.lock();
-        let mut current = self.current.lock();
+        let current = self.current.lock();
 
-        // If there is no current thread, we cannot kill
-        if current.is_none() {
-            return;
-        }
-
-        // Get the current scheduling entity
-        let current_entity = current.as_ref().unwrap();
-
-        // If the thread id matches the current thread, we remove it from the rbtree
-        if current_entity.thread().id() == thread_id {
-            cfs_tree.remove(&current_entity.vruntime());
-            *current = None; // Set current to None as the thread is killed
-        } else {
-            // Otherwise, we need to find and remove the entity from the rbtree
-                   let to_remove = cfs_tree
-            .iter()
-            .find_map(|(vruntime, entity)| {
-                if entity.thread().id() == thread_id {
-                    Some(*vruntime)
-                } else {
-                    None
-                }
-            });
-
-            // Remove the entity
-            if let Some(vruntime) = to_remove {
-                cfs_tree.remove(&vruntime);
+        // current thread cannot kill itself
+        let current_entity = current.as_ref().map(Rc::clone);
+        if let Some(entity) = current_entity {
+            if entity.thread().id() == thread_id {
+                panic!("A thread cannot kill itself!");
             }
         }
+    
+        // for each key in the rbtree, check if the thread id matches
+        let mut to_remove: Option<usize> = None;
+        for (vruntime, entity) in cfs_tree.iter() {
+            if entity.thread().id() == thread_id {
+                to_remove = Some(vruntime.clone());
+                break; // Found the thread, no need to continue
+            }
+        }
+
+        // Remove the entity
+        if to_remove.is_some() {
+            let vruntime = to_remove.unwrap();
+            cfs_tree.remove(&vruntime);
+            info!("Thread with id {} and vruntime {} killed from CFS tree", thread_id, vruntime);
+        } else {
+            info!("Thread with id {} not found in CFS tree", thread_id);
+        }
+        
     }
 
     // David:
