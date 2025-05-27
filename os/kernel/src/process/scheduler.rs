@@ -673,7 +673,7 @@ impl CfsScheduler {
         }
 
         const NICE_0_LOAD: usize = 1024; // Standardwert
-        
+
         let weight = mut_entity.weight;
 
         let weighted_delta = delta_exec * NICE_0_LOAD / weight;
@@ -682,4 +682,18 @@ impl CfsScheduler {
 
         mut_entity.last_exec_time = now;
     }
+
+    // David:
+    // Nimmt den Thread mit kleinster vruntime aus dem Baum
+    fn pick_next_entity(&self) -> Option<Rc<SchedulingEntity>> {
+        let tree = self.cfs_tree.lock();
+        tree.get_first().map(|(_key, value)| Rc::clone(value))
+    }
+
+    // David:
+    // Berechnet die initiale vruntime mithilfe der min_vruntime und des aktuellen sched_vslice
+    fn place_entity(&self, min_vruntime: usize, sched_vslice: usize) -> usize {
+        min_vruntime + sched_vslice
+    }
+
 }
