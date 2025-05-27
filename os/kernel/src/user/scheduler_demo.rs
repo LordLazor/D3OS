@@ -67,7 +67,7 @@ pub fn spawn_demo_thread() {
     cfs.ready(entity3);
     cfs.ready(entity4);
 
-
+    cfs.kill(5);
 
     info!("Spawning thread:");
     //scheduler().ready(thread);

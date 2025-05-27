@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use log::info;
 use rbtree::RBTree;
 
-use core::ptr;
+use core::{panic, ptr};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::sync::atomic::Ordering::Relaxed;
 use smallmap::Map;
@@ -620,6 +620,34 @@ impl CfsScheduler {
             info!("Thread with id {} not found in CFS tree", thread_id);
         }
         
+    }
+
+    // Lazar:
+    // Removes current thread and takes the next one from the rbtree
+    pub fn exit(&self){
+        let mut cfs_tree = self.cfs_tree.lock();
+        let current = self.current.lock();
+
+        // If there is no current thread, we cannot exit
+        if current.is_none() {
+            panic!("Can't exit when no thread is running!");
+        }
+
+        // Get the current scheduling entity and remove it from the rbtree
+        let current_entity = current.as_ref().unwrap();
+
+        // Take the next entity from the rbtree if available
+        if let Some((_, next_entity)) = cfs_tree.pop_first() {
+            *self.current.lock() = Some(Rc::clone(&next_entity));
+
+            unsafe {
+                // Switch to the next thread
+                Thread::switch(
+                    ptr::from_ref(current_entity.thread().as_ref()),
+                    ptr::from_ref(next_entity.thread().as_ref()),
+                );
+            }
+        }
     }
 
     // David:
