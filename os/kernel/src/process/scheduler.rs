@@ -637,7 +637,6 @@ impl CfsScheduler {
     pub fn check_sleep_list(&self) {
         let now = timer().systime_ms();
         let mut sleep_list = self.sleep_list.lock();
-        let mut cfs_tree = self.cfs_tree.lock();
 
         sleep_list.retain(|(thread, wakeup_time)| {
             if now >= *wakeup_time {
@@ -673,7 +672,7 @@ impl CfsScheduler {
         let vruntime = entity.vruntime();
 
         // Insert into the rbtree based on vruntime
-        cfs_tree.insert(vruntime, entity);
+        cfs_tree.insert(vruntime, entity);    
     }
 
     /*
@@ -693,7 +692,9 @@ impl CfsScheduler {
     pub fn start(&self) {
         // Start the scheduler by taking the first element from the rbtree
         let mut cfs_tree = self.cfs_tree.lock();
-        if let Some((_, entity)) = cfs_tree.pop_first() {
+        let element = cfs_tree.pop_first();
+        
+        if let Some((_, entity)) = element {
             *self.current.lock() = Some(Rc::clone(&entity));
 
             unsafe {
@@ -703,6 +704,16 @@ impl CfsScheduler {
         } else {
             panic!("No scheduling entity available to start!");
         }
+        /*if let Some((_, entity)) = cfs_tree.pop_first() {
+            *self.current.lock() = Some(Rc::clone(&entity));
+
+            unsafe {
+                // Start the first thread
+                Thread::start_first(entity.thread().as_ref());
+            }
+        } else {
+            panic!("No scheduling entity available to start!");
+        }*/
     }
 
     pub fn switch_thread_no_interrupt(&self) {
