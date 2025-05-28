@@ -845,4 +845,48 @@ impl CfsScheduler {
         min_vruntime + sched_vslice
     }
 
+    // David:
+    pub fn join(&self, target_id: usize) {
+        let mut current_lock = self.current.lock();
+        let Some(entity) = current_lock.take() else {
+            return;
+        };
+
+        let current_thread = entity.thread();
+
+        if target_id == current_thread.id() {
+            // Ein Thread kann nicht auf sich selbst warten, abbruch
+            return;
+        }
+        
+        if self.thread(target_id).is_none() {
+            // Ziel Bereits beendet, also nichts machen
+            return;
+        }
+
+        // Aktuellen Thread in die join_map eintragen
+        let mut join_map = self.join_map.lock();
+        join_map
+            .entry(target_id)
+            .or_insert_with(Vec::new)
+            .push(current_thread.clone());
+
+        drop(join_map);
+    }
+
+    // David:
+    // Methode soll immer dann aufgerufen werden, wenn ein Thread durchgelaufen ist. 
+    // Sie überprüft dann, ob Threads die vorher in der join map auf beendigung von Threads warten mussten, wieder in die ready_queue dürfen. 
+    pub fn on_thread_exit(&self, thread_id: usize) {
+        let mut join_map = self.join_map.lock();
+        if let Some(waiters) = join_map.remove(&thread_id) {
+            let mut tree = self.cfs_tree.lock();
+            for waiter in waiters {
+                let entity = SchedulingEntity::new(waiter);
+                tree.insert(entity.vruntime(), Rc::new(entity));
+            }
+        }
+    }
+    
+
 }
