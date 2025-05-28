@@ -538,6 +538,7 @@ impl CfsScheduler {
     
     /// Gibt eine Referenz auf den Thread mit der gegebenen thread_id zurück, falls vorhanden
     pub fn thread(&self, thread_id: usize) -> Option<Rc<Thread>> {
+        info!("thread locks cfs_tree");
         let cfs_tree = self.cfs_tree.lock();
         // Suche im Scheduling-Baum
         for (_vruntime, entity) in cfs_tree.iter() {
@@ -559,6 +560,7 @@ impl CfsScheduler {
                 return Some(entity.thread());
             }
         }
+
         None
     }
 
@@ -589,6 +591,7 @@ impl CfsScheduler {
 
     pub fn block(&self) {
         // Entferne aktuellen Thread aus dem Scheduling-Baum
+        info!("block locks cfs_tree");
         let mut cfs_tree = self.cfs_tree.lock();
         let mut current = self.current.lock();
 
@@ -613,9 +616,11 @@ impl CfsScheduler {
             // Kein weiterer Thread vorhanden
             *current = None;
         }
+
     }
 
     pub fn active_thread_ids(&self) -> Vec<usize> {
+        info!("active_thread_ids locks cfs_tree");
         let cfs_tree = self.cfs_tree.lock();
         let current = self.current.lock();
         let sleep_list = self.sleep_list.lock();
@@ -630,6 +635,8 @@ impl CfsScheduler {
         }
 
         ids.extend(sleep_list.iter().map(|(thread, _)| thread.id()));
+
+        unsafe{self.cfs_tree.force_unlock();} // bypass MutexGuard to avoid deadlock in the scheduler 
 
         ids
     }
@@ -665,6 +672,7 @@ impl CfsScheduler {
     */
     pub fn ready(&self, thread: Rc<Thread>) {
         // Insert the scheduling entity into the rbtree
+        info!("ready locks cfs_tree");
         let mut cfs_tree = self.cfs_tree.lock();
 
         let entity = Rc::new(SchedulingEntity::new(thread));
@@ -691,8 +699,8 @@ impl CfsScheduler {
     */
     pub fn start(&self) {
         // Start the scheduler by taking the first element from the rbtree
-        let mut cfs_tree = self.cfs_tree.lock();
-        let element = cfs_tree.pop_first();
+        info!("start locks cfs_tree");
+        let element = self.cfs_tree.lock().pop_first();
         
         if let Some((_, entity)) = element {
             *self.current.lock() = Some(Rc::clone(&entity));
@@ -731,6 +739,7 @@ impl CfsScheduler {
         and updates the current scheduling entity.
     */
     pub fn switch_thread(&self, interrupt: bool) {
+        info!("switch_thread locks cfs_tree");
         let mut cfs_tree = self.cfs_tree.lock();
         let mut current = self.current.lock();
         
@@ -773,6 +782,7 @@ impl CfsScheduler {
         Kill the given thread id
     */
     pub fn kill(&self, thread_id: usize) {
+        info!("kill locks cfs_tree");
         let mut cfs_tree = self.cfs_tree.lock();
         let current = self.current.lock();
 
@@ -807,6 +817,7 @@ impl CfsScheduler {
     // Lazar:
     // Removes current thread and takes the next one from the rbtree
     pub fn exit(&self){
+        info!("exit locks cfs_tree");
         let mut cfs_tree = self.cfs_tree.lock();
         let current = self.current.lock();
 
@@ -866,6 +877,7 @@ impl CfsScheduler {
     // David:
     // Nimmt den Thread mit kleinster vruntime aus dem Baum
     fn pick_next_entity(&self) -> Option<Rc<SchedulingEntity>> {
+        info!("pick_next_entity locks cfs_tree");
         let tree = self.cfs_tree.lock();
         tree.get_first().map(|(_key, value)| Rc::clone(value))
     }
@@ -911,6 +923,7 @@ impl CfsScheduler {
     pub fn on_thread_exit(&self, thread_id: usize) {
         let mut join_map = self.join_map.lock();
         if let Some(waiters) = join_map.remove(&thread_id) {
+            info!("on_thread_exit locks cfs_tree");
             let mut tree = self.cfs_tree.lock();
             for waiter in waiters {
                 let entity = SchedulingEntity::new(waiter);
