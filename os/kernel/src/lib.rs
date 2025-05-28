@@ -231,7 +231,7 @@ pub fn process_manager() -> &'static RwLock<ProcessManager> {
 /// Allows to access active threads, put threads to sleep, exit/kill threads and creates new ones.
 static SCHEDULER: Once<Scheduler> = Once::new();
 
-pub fn scheduler() -> &'static Scheduler {
+pub fn old_scheduler() -> &'static Scheduler {
     SCHEDULER.call_once(|| Scheduler::new());
     SCHEDULER.get().unwrap()
 }
@@ -239,7 +239,7 @@ pub fn scheduler() -> &'static Scheduler {
 // CfsScheduler.
 static CFS_SCHEDULER: Once<CfsScheduler> = Once::new();
 
-pub fn cfs_scheduler() -> &'static CfsScheduler {
+pub fn scheduler() -> &'static CfsScheduler {
     CFS_SCHEDULER.call_once(|| CfsScheduler::new());
     CFS_SCHEDULER.get().unwrap()
 }

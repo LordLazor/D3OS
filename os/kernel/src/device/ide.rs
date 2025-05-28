@@ -564,7 +564,8 @@ impl IdeChannel {
 
         // Select drive and wait 400 ns for the controller to process the command
         unsafe { self.command.drive_head.write(selector) };
-        scheduler().sleep(1);
+        let s = scheduler();
+        s.sleep(1);
 
         // Wait for the BUSY bit to be cleared
         if !self.wait_busy(WAIT_ON_STATUS_TIMEOUT) {

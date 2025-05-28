@@ -57,7 +57,7 @@ unsafe impl Sync for Scheduler {}
 /// Called from assembly code, after the thread has been switched
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlock_scheduler() {
-    unsafe { scheduler().ready_state.force_unlock(); }
+    unsafe { scheduler().cfs_tree.force_unlock(); }
 }
 
 impl Scheduler {
@@ -444,6 +444,17 @@ impl SchedulingEntity {
     }
 }
 
+struct CfsReadyState {
+    initialized: bool,
+}
+
+impl CfsReadyState {
+    pub fn new() -> Self {
+        Self {
+            initialized: false,
+        }
+    }
+}
 
 pub struct CfsScheduler {
     // Red-Black-Tree (z. B. via BTreeMap, echte RBT-Implementierungen sind ebenfalls möglich)
@@ -453,7 +464,7 @@ pub struct CfsScheduler {
     current: Mutex<Option<Rc<SchedulingEntity>>>,
     sleep_list: Mutex<Vec<(Rc<Thread>, usize)>>,
     join_map: Mutex<Map<usize, Vec<Rc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
-    initialized: Mutex<bool>,
+    ready_state: Mutex<CfsReadyState>,
     // Globale Zeitscheibensteuerung
     // scheduling_latency: usize,
     // min_granularity: usize,
@@ -514,14 +525,15 @@ impl CfsScheduler {
             current: Mutex::new(None),
             sleep_list: Mutex::new(Vec::new()),
             join_map: Mutex::new(Map::new()),
-            initialized: Mutex::new(false)
+            ready_state: Mutex::new(CfsReadyState::new()),
         }
     }
 
     pub fn set_init(&self) {
         // Set the initialized field for this instance
-        let mut init_lock = self.initialized.lock();
-        *init_lock = true;
+        let mut ready_state = self.ready_state.lock();
+
+        ready_state.initialized = true;
     }
     
     /// Gibt eine Referenz auf den Thread mit der gegebenen thread_id zurück, falls vorhanden
@@ -553,18 +565,26 @@ impl CfsScheduler {
 
 
     pub fn sleep(&self, ms: usize) {
-        let current_entity = {
-            let current = self.current.lock();
-            current.as_ref().expect("No current entity!").thread()
-        };
-        let wakeup_time = timer().systime_ms() + ms;
+        let ready_state = self.ready_state.lock();
 
-        {
-            let mut sleep_list = self.sleep_list.lock();
-            sleep_list.push((current_entity, wakeup_time));
+        if !ready_state.initialized {
+            timer().wait(ms);
+        } else {
+
+
+            let current_entity = {
+                let current = self.current.lock();
+                current.as_ref().expect("No current entity!").thread()
+            };
+            let wakeup_time = timer().systime_ms() + ms;
+
+            {
+                let mut sleep_list = self.sleep_list.lock();
+                sleep_list.push((current_entity, wakeup_time));
+            }
+
+            self.block();
         }
-
-        self.block();
     }
 
     pub fn block(&self) {
