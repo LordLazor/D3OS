@@ -76,6 +76,7 @@ impl Scheduler {
         self.get_ready_state().initialized = true;
     }
 
+    // Implemented in CFS
     pub fn active_thread_ids(&self) -> Vec<usize> {
         let state = self.get_ready_state();
         let sleep_list = self.sleep_list.lock();
@@ -89,6 +90,7 @@ impl Scheduler {
     }
 
     /// Description: Return reference to current thread
+    // Implemented in CFS
     pub fn current_thread(&self) -> Rc<Thread> {
         let state = self.get_ready_state();
         Scheduler::current(&state)
@@ -269,6 +271,8 @@ impl Scheduler {
     /// 
     /// Parameters: `thread_id` thread to be killed
     /// 
+    /// 
+    /// Implemented in CFS
     pub fn kill(&self, thread_id: usize) {
         {
             // Check if current thread tries to kill itself (illegal)
@@ -447,7 +451,9 @@ pub struct CfsScheduler {
 
     // Aktuell laufende Scheduling-Entity (nicht im run_queue enthalten)
     current: Mutex<Option<Rc<SchedulingEntity>>>,
-
+    sleep_list: Mutex<Vec<(Rc<Thread>, usize)>>,
+    join_map: Mutex<Map<usize, Vec<Rc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
+    initialized: Mutex<bool>,
     // Globale Zeitscheibensteuerung
     // scheduling_latency: usize,
     // min_granularity: usize,
@@ -506,18 +512,144 @@ impl CfsScheduler {
         Self {
             cfs_tree: Mutex::new(RBTree::new()),
             current: Mutex::new(None),
+            sleep_list: Mutex::new(Vec::new()),
+            join_map: Mutex::new(Map::new()),
+            initialized: Mutex::new(false)
         }
+    }
+
+    pub fn set_init(&self) {
+        // Set the initialized field for this instance
+        let mut init_lock = self.initialized.lock();
+        *init_lock = true;
+    }
+    
+    /// Gibt eine Referenz auf den Thread mit der gegebenen thread_id zurück, falls vorhanden
+    pub fn thread(&self, thread_id: usize) -> Option<Rc<Thread>> {
+        let cfs_tree = self.cfs_tree.lock();
+        // Suche im Scheduling-Baum
+        for (_vruntime, entity) in cfs_tree.iter() {
+            if entity.thread().id() == thread_id {
+                return Some(entity.thread());
+            }
+        }
+        // Suche in der Sleep-Liste
+        let sleep_list = self.sleep_list.lock();
+        for (thread, _) in sleep_list.iter() {
+            if thread.id() == thread_id {
+                return Some(Rc::clone(thread));
+            }
+        }
+        // Suche im aktuellen Thread
+        let current = self.current.lock();
+        if let Some(entity) = current.as_ref() {
+            if entity.thread().id() == thread_id {
+                return Some(entity.thread());
+            }
+        }
+        None
+    }
+
+
+
+    pub fn sleep(&self, ms: usize) {
+        let current_entity = {
+            let current = self.current.lock();
+            current.as_ref().expect("No current entity!").thread()
+        };
+        let wakeup_time = timer().systime_ms() + ms;
+
+        {
+            let mut sleep_list = self.sleep_list.lock();
+            sleep_list.push((current_entity, wakeup_time));
+        }
+
+        self.block();
+    }
+
+    pub fn block(&self) {
+        // Entferne aktuellen Thread aus dem Scheduling-Baum
+        let mut cfs_tree = self.cfs_tree.lock();
+        let mut current = self.current.lock();
+
+        if current.is_none() {
+            return;
+        }
+
+        let current_entity = current.take().unwrap();
+        // Nicht vergessen: Entity aus dem Baum entfernen, falls noch vorhanden
+        cfs_tree.remove(&current_entity.vruntime());
+
+        // Nächste Entity auswählen
+        if let Some((_, next_entity)) = cfs_tree.pop_first() {
+            *current = Some(Rc::clone(&next_entity));
+            unsafe {
+                Thread::switch(
+                    ptr::from_ref(current_entity.thread().as_ref()),
+                    ptr::from_ref(next_entity.thread().as_ref()),
+                );
+            }
+        } else {
+            // Kein weiterer Thread vorhanden
+            *current = None;
+        }
+    }
+
+    pub fn active_thread_ids(&self) -> Vec<usize> {
+        let cfs_tree = self.cfs_tree.lock();
+        let current = self.current.lock();
+        let sleep_list = self.sleep_list.lock();
+
+        let mut ids: Vec<usize> = cfs_tree
+            .iter()
+            .map(|(_vruntime, entity)| entity.thread().id())
+            .collect();
+
+        if let Some(entity) = current.as_ref() {
+            ids.push(entity.thread().id());
+        }
+
+        ids.extend(sleep_list.iter().map(|(thread, _)| thread.id()));
+
+        ids
+    }
+
+    pub fn check_sleep_list(&self) {
+        let now = timer().systime_ms();
+        let mut sleep_list = self.sleep_list.lock();
+        let mut cfs_tree = self.cfs_tree.lock();
+
+        sleep_list.retain(|(thread, wakeup_time)| {
+            if now >= *wakeup_time {
+                // Entity für diesen Thread suchen (z.B. über Thread-ID)
+                // Hier musst du ggf. eine passende Methode implementieren!
+                // Beispiel (wenn du eine Mapping-Funktion hast):
+                // if let Some(entity) = self.find_entity_by_thread(thread.id()) {
+                //     cfs_tree.insert(entity.vruntime(), Rc::clone(&entity));
+                // }
+                false // Thread aus Sleep-Liste entfernen
+            } else {
+                true // Thread bleibt in Sleep-Liste
+            }
+        });
+    }
+
+    pub fn current_thread(&self) -> Rc<Thread> {
+        let current = self.current.lock();
+        let entity = current.as_ref().expect("No current entity in CFS scheduler!");
+        entity.thread()
     }
 
     /*
         Lazar Konstantinou:
         Puts a scheduling entity into the rbtree
     */
-    pub fn ready(&self, entity: Rc<SchedulingEntity>) {
+    pub fn ready(&self, thread: Rc<Thread>) {
         // Insert the scheduling entity into the rbtree
         let mut cfs_tree = self.cfs_tree.lock();
 
-        let entity = Rc::clone(&entity);
+        let entity = Rc::new(SchedulingEntity::new(thread));
+
         let vruntime = entity.vruntime();
 
         // Insert into the rbtree based on vruntime
@@ -553,15 +685,24 @@ impl CfsScheduler {
         }
     }
 
+    pub fn switch_thread_no_interrupt(&self) {
+        self.switch_thread(false);
+    }
+
+    /// Wechselt vom aktuellen zum nächsten Thread im CFS (mit Interrupt)
+    pub fn switch_thread_from_interrupt(&self) {
+        self.switch_thread(true);
+    }
+
     /* 
         Lazar Konstantinou:
         Switches the current thread to the next one in the rbtree
         and updates the current scheduling entity.
     */
-    pub fn switch_thread(&self) {
+    pub fn switch_thread(&self, interrupt: bool) {
         let mut cfs_tree = self.cfs_tree.lock();
         let mut current = self.current.lock();
-
+        
         // If there is no current thread, we cannot switch
         if current.is_none() {
             return;
@@ -569,11 +710,19 @@ impl CfsScheduler {
 
         // Get the current scheduling entity and remove it from the rbtree
         let current_entity = current.as_ref().unwrap();
-        cfs_tree.remove(&current_entity.vruntime());
 
         // Get the next entity from the rbtree
         if let Some((_, next_entity)) = cfs_tree.pop_first() {
             *self.current.lock() = Some(Rc::clone(&next_entity));
+            
+            if self.current.lock().as_mut().unwrap().thread().stacks_locked() || tss().is_locked() {
+                return;
+            }
+
+            if interrupt {
+                // If called from an interrupt, send EOI to APIC
+                apic().end_of_interrupt();
+            }
 
             unsafe {
                 // Switch to the next thread

@@ -326,7 +326,7 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
         .expect("Initrd not found!");
     init_initrd(initrd_tag);
 
-    spawn_demo_thread();
+    //spawn_demo_thread();
 
     // Create and register the cleanup thread in the scheduler
     // (If the last thread of a process terminates, it cannot delete its own address space)

@@ -1,9 +1,5 @@
 use alloc::rc::Rc;
 
-use crate::{cfs_scheduler, process::scheduler};
-
-
-
 pub fn spawn_demo_thread() {
     use log::info;
 
@@ -21,7 +17,7 @@ pub fn spawn_demo_thread() {
         "test_thread1",
     );
 
-    let entity1 = Rc::new(SchedulingEntity::new(thread));
+
 
     // ent 2
     let thread2 = Thread::new_kernel_thread(
@@ -33,7 +29,7 @@ pub fn spawn_demo_thread() {
         },
         "test_thread2",
     );
-    let entity2 = Rc::new(SchedulingEntity::new(thread2));
+
 
     // ent 3
     let thread3 = Thread::new_kernel_thread(
@@ -45,7 +41,7 @@ pub fn spawn_demo_thread() {
         },
         "test_thread3",
     );
-    let entity3 = Rc::new(SchedulingEntity::new(thread3));
+
 
     // ent 4
     let thread4 = Thread::new_kernel_thread(
@@ -57,15 +53,15 @@ pub fn spawn_demo_thread() {
         },
         "test_thread4",
     );
-    let entity4 = Rc::new(SchedulingEntity::new(thread4));
 
 
 
-    let cfs = cfs_scheduler();
-    cfs.ready(entity1);
-    cfs.ready(entity2);
-    cfs.ready(entity3);
-    cfs.ready(entity4);
+
+    let cfs = scheduler();
+    cfs.ready(thread);
+    cfs.ready(thread2);
+    cfs.ready(thread3);
+    cfs.ready(thread4);
 
     cfs.kill(5);
 
