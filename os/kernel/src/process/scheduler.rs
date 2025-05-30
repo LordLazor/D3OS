@@ -978,5 +978,85 @@ impl CfsScheduler {
         }
     }
     
+    // David:
+    // Fügt laufenden Thread nach Ende seiner Zeitscheibe wieder in den Baum ein.
+    // Nicht identisch zu ready(), da dort ein neuer Thread mit neu berechneter vruntime eingefügt wird
+    fn put_prev_entity(&self) {
+        let mut state = self.ready_state.lock();
+
+        // Clone current entity
+        let current_entity = state.current.as_ref().map(Rc::clone);
+        if current_entity.is_none() {
+            return;
+        }
+
+        if let Some(entity) = current_entity {
+            let cfs_tree = &mut state.cfs_tree;
+            cfs_tree.insert(entity.vruntime(), entity);
+        }
+    }
+
+
+    // David:
+    // Gibt die kleinste vruntime aller laufbereiten Threads zurück
+    // Wird für faire vruntime neuer Threads benötigt, damit diese weder benachteiligt noch bevorzugt werden
+    // Threads erhalten dann, vruntime: min_vruntime + sched_vslice
+    fn min_vruntime(&self) -> usize {
+        let state = self.ready_state.lock();
+
+        // Clone current entity
+        let current_entity = state.current.as_ref().map(Rc::clone);
+        if current_entity.is_none() {
+            return 0;
+        }
+
+        let curr_vruntime = current_entity.as_ref().map(|e| e.vruntime()); //vruntime vom aktuellen Thread
+
+
+        let cfs_tree = &state.cfs_tree;
+        let min_entity = cfs_tree.get_first().map(|(_, e)| e.vruntime()); //kleinste vruntime aus dem Baum
+
+
+
+        match (min_entity, curr_vruntime) { //gebe die kleinste vruntime zurück
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => 0,
+        }
+    }
+
+
+    // David:
+    // Methode, die prüft, ob die Zeitscheibe für einen Thread abgelaufen ist. Wenn ja, füge den Thread wieder in den Baum ein.
+    fn entity_tick(&self, total_weight: usize, nr_running: usize) {
+        self.update_current();
+
+        let state = self.ready_state.lock();
+
+        let current_entity = state.current.as_ref().map(Rc::clone);
+        if current_entity.is_none() {
+            return;
+        }
+        let Some(entity) = current_entity.as_ref() else {
+            return;
+        };
+
+        let weight = entity.weight;
+        let sched_slice = self.sched_slice(weight, total_weight, nr_running);
+
+        let now = timer().systime_ns();
+        let delta_exec = now.saturating_sub(entity.last_exec_time);
+
+        if delta_exec > sched_slice {
+            drop(current_entity);
+            self.put_prev_entity();
+        }
+    }
+    
+    // Provisorische sched_slice Methode, die eine Konstante zurückgibt und unter anderem in entity_tick aufgerufen wird
+    fn sched_slice(&self, weight: usize, total_weight: usize, nr_running: usize) -> usize {
+        6_000_000 // 6 ms
+    }
 
 }
