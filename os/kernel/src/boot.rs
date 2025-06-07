@@ -383,7 +383,8 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
     info!("Starting scheduler");
 
 
-    scheduler().start();
+    let s = scheduler();
+    s.start();
 
     
     

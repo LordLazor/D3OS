@@ -32,13 +32,12 @@ use crate::memory::PAGE_SIZE;
 use crate::memory::acpi_handler::AcpiHandler;
 use crate::memory::kheap::KernelAllocator;
 use crate::process::process_manager::ProcessManager;
-use crate::process::scheduler::Scheduler;
 use crate::process::thread::Thread;
 use crate::syscall::syscall_dispatcher::CoreLocalStorage;
 use ::log::{Level, Log, Record, error};
 use acpi::AcpiTables;
 use alloc::sync::Arc;
-use process::scheduler::CfsScheduler;
+use process::scheduler::Scheduler;
 use core::fmt::Arguments;
 use core::panic::PanicInfo;
 use multiboot2::ModuleTag;
@@ -231,18 +230,12 @@ pub fn process_manager() -> &'static RwLock<ProcessManager> {
 /// Allows to access active threads, put threads to sleep, exit/kill threads and creates new ones.
 static SCHEDULER: Once<Scheduler> = Once::new();
 
-pub fn old_scheduler() -> &'static Scheduler {
+pub fn scheduler() -> &'static Scheduler {
     SCHEDULER.call_once(|| Scheduler::new());
     SCHEDULER.get().unwrap()
 }
 
-// CfsScheduler.
-static CFS_SCHEDULER: Once<CfsScheduler> = Once::new();
 
-pub fn scheduler() -> &'static CfsScheduler {
-    CFS_SCHEDULER.call_once(|| CfsScheduler::new());
-    CFS_SCHEDULER.get().unwrap()
-}
 
 /// Interrupt Dispatcher.
 /// This dispatcher is called when an interrupt occurs and calls the corresponding interrupt handler.
