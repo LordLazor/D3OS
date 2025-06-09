@@ -29,15 +29,15 @@ pub fn next_thread_id() -> usize {
 
 struct ReadyState {
     initialized: bool,
-    cfs_tree: RBTree<usize, Rc<SchedulingEntity>>,
+    rb_tree: RBTree<usize, Rc<SchedulingEntity>>,
     current: Option<Rc<SchedulingEntity>>,
 }
 
 // TODO: Remove public and make private after testing
 pub struct SchedulingEntity {
     vruntime: usize,
-    weight: usize,
     nice: usize,
+    weight: usize,
     last_exec_time: usize,
     thread: Rc<Thread>,
 }
@@ -71,13 +71,13 @@ impl SchedulingEntity {
         let current_time = timer().systime_ns();
         let vruntime = GLOBAL_VRUNTIME_COUNTER.fetch_add(1, Ordering::Relaxed);
         let nice = 0; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
-        //let weight = CfsScheduler::nice_to_weight(nice) as usize;
+        //let weight = CfsScheduler::nice_to_weight(nice) as usize
         let weight = 0;
         Self {
             vruntime: vruntime,
-            weight: weight,
             nice: nice as usize,
             last_exec_time: current_time,
+            weight: weight,
             thread,
         }
     }
@@ -106,7 +106,7 @@ impl Scheduler {
         Self {
             ready_state: Mutex::new(ReadyState {
                 initialized: false,
-                cfs_tree: RBTree::new(),
+                rb_tree: RBTree::new(),
                 current: None,
             }),
             sleep_list: Mutex::new(Vec::new()),
@@ -121,7 +121,7 @@ impl Scheduler {
 
 
     /// Lazar Konstantinou:
-    /// Returns all given thread ids that are currently active in the scheduler. (cfs_tree and sleep_list)
+    /// Returns all given thread ids that are currently active in the scheduler. (rb_tree and sleep_list)
     /// 
     /// Small changes inside this function to use the SchedulingEntity instead of the Thread directly inside of sleep map and cfs tree
     pub fn active_thread_ids(&self) -> Vec<usize> {
@@ -129,7 +129,7 @@ impl Scheduler {
 
         let sleep_list = self.sleep_list.lock();
 
-        state.cfs_tree.iter()
+        state.rb_tree.iter()
             .map(|(_vruntime, entity)| entity.thread().id())
             .collect::<Vec<usize>>()
             .into_iter()
@@ -151,7 +151,7 @@ impl Scheduler {
     /// Lazar Konstantinou:
     /// Changes for the cfs scheduler as accessing the SchedulingEntity
     pub fn thread(&self, thread_id: usize) -> Option<Rc<Thread>> {
-        self.get_ready_state().cfs_tree
+        self.get_ready_state().rb_tree
             .iter()
             .find(|(_, entity)| entity.thread().id() == thread_id)
             .map(|(_, entity)| Rc::clone(entity).thread())
@@ -163,8 +163,8 @@ impl Scheduler {
     /// Changes for the cfs scheduler as using the cfs tree correctly 
     pub fn start(&self) {
         let mut state = self.get_ready_state();
-        state.current = state.cfs_tree.pop_first().map(|(_, entity)| entity);
-        
+        state.current = state.rb_tree.pop_first().map(|(_, entity)| entity);
+
         unsafe { 
             let entity = state.current.as_ref().expect("Failed to pop first thread from cfs tree!");
             Thread::start_first(entity.thread().as_ref());
@@ -206,7 +206,7 @@ impl Scheduler {
             }
         }
 
-        state.cfs_tree.insert(entity.vruntime(), entity);
+        state.rb_tree.insert(entity.vruntime(), entity);
         join_map.insert(id, Vec::new());
     }
 
@@ -226,6 +226,11 @@ impl Scheduler {
                 let mut sleep_list = self.sleep_list.lock();
                 sleep_list.push((thread, wakeup_time));
             }
+
+            // TODO
+            // Wenn Thread geschlafen hat muss noch die vruntime aktualisiert werden
+            // Da muss dann fair eingereiht ggf., weil seine vruntime ggf. sehr klein ist und dann dauerthaft laufen darf
+            // David's vorschlag: mean-virtualruntime
 
             self.block(&mut state);
         }
@@ -250,7 +255,7 @@ impl Scheduler {
             }
 
             let current = Scheduler::current(&state);
-            let next = match state.cfs_tree.pop_first() {
+            let next = match state.rb_tree.pop_first() {
                 Some((_, entity)) => entity,
                 None => return,
             };
@@ -264,7 +269,7 @@ impl Scheduler {
             let next_ptr = ptr::from_ref(next.thread().as_ref());
 
             state.current = Some(next);
-            state.cfs_tree.insert(current.vruntime(), current);
+            state.rb_tree.insert(current.vruntime(), current);
 
             if interrupt {
                 apic().end_of_interrupt();
@@ -276,14 +281,31 @@ impl Scheduler {
         }
     }
 
+    // TODO: Update vruntime of current thread 
+    // Update current thread's vruntime
+    // before inserting into the rb_tree check if current threads new vruntime is smaller than the min vruntime of rb tree
+    // if true: return false, because the current thread should not be switched out
+    // if false: return true and insert old current into tree, because the current thread should be switched out
+    fn check_switch_thread(&self) -> bool {
+        
+        
+        return true;
+    }
+
     /// Description: helper function, calling `switch_thread`
     pub fn switch_thread_no_interrupt(&self) {
-        self.switch_thread(false);
+
+        if self.check_switch_thread() {
+            self.switch_thread(false);
+        }
+        
     }
 
     /// Description: helper function, calling `switch_thread`
     pub fn switch_thread_from_interrupt(&self) {
-        self.switch_thread(true);
+        if self.check_switch_thread() {
+            self.switch_thread(true);
+        }
     }
 
     /// 
@@ -330,7 +352,7 @@ impl Scheduler {
             let join_list = join_map.get_mut(&current.thread().id()).expect("Missing join_map entry!");
 
             for entity in join_list {
-                ready_state.cfs_tree.insert(entity.vruntime(),Rc::clone(entity));
+                ready_state.rb_tree.insert(entity.vruntime(),Rc::clone(entity));
             }
 
             join_map.remove(&current.thread().id());
@@ -366,14 +388,14 @@ impl Scheduler {
         let join_list = join_map.get_mut(&thread_id).expect("Missing join map entry!");
 
         for entity in join_list {
-            ready_state.cfs_tree.insert(entity.vruntime(), Rc::clone(entity));
+            ready_state.rb_tree.insert(entity.vruntime(), Rc::clone(entity));
         }
 
         join_map.remove(&thread_id);
 
         /* Hier nochmal checken ob das richtig ist */
         // Alle vruntime-Keys sammeln, deren Entity die gewünschte Thread-ID hat
-        let to_remove: Vec<usize> = ready_state.cfs_tree
+        let to_remove: Vec<usize> = ready_state.rb_tree
             .iter()
             .filter(|(_, entity)| entity.thread().id() == thread_id)
             .map(|(vruntime, _)| *vruntime)
@@ -381,7 +403,7 @@ impl Scheduler {
 
         // Jetzt alle passenden Keys entfernen
         for vruntime in to_remove {
-            ready_state.cfs_tree.remove(&vruntime);
+            ready_state.rb_tree.remove(&vruntime);
         }
     }
 
@@ -395,14 +417,14 @@ impl Scheduler {
     /// Lazar Konstantinou:
     /// Changes for the cfs scheduler as using the rb tree correct and correct refs to the given objects inside
     fn block(&self, state: &mut ReadyState) {
-        let mut first_node = state.cfs_tree.pop_first();
+        let mut first_node = state.rb_tree.pop_first();
 
         {
             // Execute in own block, so that the lock is released automatically (block() does not return)
             let mut sleep_list = self.sleep_list.lock();
             while first_node.is_none() {
                 Scheduler::check_sleep_list(state, &mut sleep_list);
-                first_node = state.cfs_tree.pop_first();
+                first_node = state.rb_tree.pop_first();
             }
         }
 
@@ -441,7 +463,7 @@ impl Scheduler {
         sleep_list.retain(|entry| {
             if time >= entry.1 {
                 
-                state.cfs_tree.insert(entry.0.vruntime(), Rc::clone(&entry.0));
+                state.rb_tree.insert(entry.0.vruntime(), Rc::clone(&entry.0));
                 return false;
             }
 
@@ -510,16 +532,7 @@ impl Scheduler {
         let idx = (nice + 20).clamp(0, 39) as usize; //Wandelt nice Wert in das passendes Gewicht um, indem er den korrekten Index aus dem Array aufruft, -20 ist Index 0, 19 ist Index 39...
         Scheduler::PRIO_TO_WEIGHT[idx]
     }
-    pub const PRIO_TO_WMULT: [u32; 40] = [
-        48388, 59856, 76040, 92818, 118348,
-        147320, 184698, 229616, 287308, 360437,
-        449829, 563644, 704093, 875809, 1099582,
-        1376151, 1717300, 2157191, 2708050, 3363326,
-        4194304, 5237765, 6557202, 8165337, 10153587,
-        12820798, 15790321, 19976592, 24970740, 31350126,
-        39045157, 49367440, 61356676, 76695844, 95443717,
-        119304647, 148102320, 186737708, 238609294, 286331153,
-    ];
+
 
 
     // David:
@@ -560,7 +573,7 @@ impl Scheduler {
     fn pick_next_entity(&self) -> Option<Rc<SchedulingEntity>> {
         let state = self.get_ready_state();
         
-        state.cfs_tree.get_first().map(|(_key, value)| Rc::clone(value))
+        state.rb_tree.get_first().map(|(_key, value)| Rc::clone(value))
     }
 
     // David:
@@ -583,7 +596,7 @@ impl Scheduler {
 
         if let Some(entity) = current_entity {
 
-            state.cfs_tree.insert(entity.vruntime(), entity);
+            state.rb_tree.insert(entity.vruntime(), entity);
         }
     }
 
@@ -604,8 +617,8 @@ impl Scheduler {
         let curr_vruntime = current_entity.as_ref().map(|e| e.vruntime()); //vruntime vom aktuellen Thread
 
 
-        let cfs_tree = &state.cfs_tree;
-        let min_entity = cfs_tree.get_first().map(|(_, e)| e.vruntime()); //kleinste vruntime aus dem Baum
+        let rb_tree = &state.rb_tree;
+        let min_entity = rb_tree.get_first().map(|(_, e)| e.vruntime()); //kleinste vruntime aus dem Baum
 
 
 
@@ -660,12 +673,12 @@ impl Scheduler {
     pub fn on_thread_exit(&self, thread_id: usize) {
         let mut join_map = self.join_map.lock();
         if let Some(waiters) = join_map.remove(&thread_id) {
-            //info!("on_thread_exit locks cfs_tree");
+            //info!("on_thread_exit locks rb_tree");
             let mut state = self.ready_state.lock();
 
-            let cfs_tree = &mut state.cfs_tree;
+            let rb_tree = &mut state.rb_tree;
             for waiter in waiters {
-                cfs_tree.insert(waiter.vruntime(), waiter);
+                rb_tree.insert(waiter.vruntime(), waiter);
             }
         }
     }

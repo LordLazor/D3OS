@@ -470,10 +470,10 @@ impl Thread {
     }
 
     /// Calling thread will wait until 'self' terminates
-    /*#[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn join(&self) {
         scheduler().join(self.id());
-    }*/
+    }
 
     /// Return my thread id
     pub fn id(&self) -> usize {
