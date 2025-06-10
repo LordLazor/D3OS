@@ -82,6 +82,18 @@ impl SchedulingEntity {
         }
     }
 
+    pub fn new_all(thread: Rc<Thread>, vruntime: usize, nice: usize, weight: usize) -> Self {
+        // current system time in nanoseconds
+        let current_time = timer().systime_ns();
+        Self {
+            vruntime,
+            nice: nice as usize,
+            last_exec_time: current_time,
+            weight,
+            thread,
+        }
+    }
+
     /*
         Lazar Konstantinou:
         Returns the current virtual runtime of the scheduling entity
@@ -89,6 +101,12 @@ impl SchedulingEntity {
     pub fn vruntime(&self) -> usize {
         self.vruntime
     }
+
+    pub fn set_vruntime(&mut self, vruntime: usize) {
+        self.vruntime = vruntime;
+    }
+
+
 
     /*
         Lazar Konstantinou:
@@ -281,15 +299,45 @@ impl Scheduler {
         }
     }
 
-    // TODO: Update vruntime of current thread 
+    // Lazar Konstantinou:
     // Update current thread's vruntime
     // before inserting into the rb_tree check if current threads new vruntime is smaller than the min vruntime of rb tree
     // if true: return false, because the current thread should not be switched out
     // if false: return true and insert old current into tree, because the current thread should be switched out
     fn check_switch_thread(&self) -> bool {
+
+        let state = self.get_ready_state();
         
-        
-        return true;
+        if state.initialized {
+
+            if let Some(current_entity) = state.current.as_ref() {
+                // Update vruntime of current thread
+                
+                let current_entity_tid = current_entity.thread().id();
+
+                self.update_current();
+                
+                let next = Scheduler::current(&state);
+                let next_tid = next.thread().id();
+
+                if current_entity_tid == next_tid {
+                    // Current thread is still the same, so we do not need to switch threads
+                    return false;
+                }
+
+                return true; // We can switch threads, because the current thread is not the same as the next thread
+
+            
+            } else {
+                return false; // No current thread, so we cannot switch threads
+            }
+            
+            
+        } else {
+            // Scheduler is not initialized yet, so we cannot switch threads
+            return false;
+        }
+
     }
 
     /// Description: helper function, calling `switch_thread`
@@ -534,16 +582,19 @@ impl Scheduler {
     }
 
 
-
     // David:
     // Updated die virtual Runtime des aktuellen Threads indem:
     // (deltaExecTime × NICE_0_WEIGHT)/weight_schedule_entity
     fn update_current(&self) {
+        
         let now = timer().systime_ns();
         let mut state = self.get_ready_state();
+        let mut current = state.current.take();
+        let rb_tree = &mut state.rb_tree;
+
 
         // Direkter mutabler Zugriff auf current
-        let Some(current_rc) = state.current.as_mut() else {
+        let Some(current_rc) = current.as_mut() else {
             return;
         };
 
@@ -565,8 +616,28 @@ impl Scheduler {
 
         current.vruntime += weighted_delta;
         current.last_exec_time = now;
+        
+
+        // Lazar:
+        // If the current threads new vruntime is greater than the minimum vruntime in the rb_tree, we need to update the current entity
+        // => Insert current entity back into the rb_tree
+        // => Pop the smallest entity from the rb_tree and set it as current
+        
+        
+        let mut binding = rb_tree.get_first().map(|(_key, value)| value.vruntime());
+        let min_vruntime = binding.as_mut().unwrap();
+        if current.vruntime > *min_vruntime {
+            // Insert current entity back into the rb_tree.get_first().map(|(_key, value)| value.vruntime()).as_mut().unwrap();
+            rb_tree.insert(current.vruntime, Rc::clone(current_rc));
+
+            // Pop the smallest entity from the rb_tree and set it as current
+            if let Some((_, next_entity)) = state.rb_tree.pop_first() {
+                state.current = Some(next_entity);
+            }
+        }
 
     }
+
 
     // David:
     // Nimmt den Thread mit kleinster vruntime aus dem Baum
