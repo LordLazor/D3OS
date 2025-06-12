@@ -29,6 +29,7 @@ pub fn next_thread_id() -> usize {
 
 struct ReadyState {
     initialized: bool,
+    last_switch_time: usize,
     rb_tree: RBTree<usize, Rc<SchedulingEntity>>,
     current: Option<Rc<SchedulingEntity>>,
 }
@@ -68,29 +69,16 @@ impl SchedulingEntity {
      */
     pub fn new(thread: Rc<Thread>) -> Self {
         // current system time in nanoseconds
-        let current_time = timer().systime_ns();
-        let vruntime = GLOBAL_VRUNTIME_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let current_time = timer().systime_ms();
         let nice = 0; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
         //let weight = CfsScheduler::nice_to_weight(nice) as usize
         let weight = 0;
         Self {
-            vruntime: vruntime,
+            vruntime: current_time,
             nice: nice as usize,
             last_exec_time: current_time,
             weight: weight,
-            thread,
-        }
-    }
-
-    pub fn new_all(thread: Rc<Thread>, vruntime: usize, nice: usize, weight: usize) -> Self {
-        // current system time in nanoseconds
-        let current_time = timer().systime_ns();
-        Self {
-            vruntime,
-            nice: nice as usize,
-            last_exec_time: current_time,
-            weight,
-            thread,
+            thread: thread,
         }
     }
 
@@ -124,6 +112,7 @@ impl Scheduler {
         Self {
             ready_state: Mutex::new(ReadyState {
                 initialized: false,
+                last_switch_time: 0,
                 rb_tree: RBTree::new(),
                 current: None,
             }),
@@ -305,38 +294,34 @@ impl Scheduler {
     // if true: return false, because the current thread should not be switched out
     // if false: return true and insert old current into tree, because the current thread should be switched out
     fn check_switch_thread(&self) -> bool {
-
-        let state = self.get_ready_state();
         
-        if state.initialized {
-
-            if let Some(current_entity) = state.current.as_ref() {
-                // Update vruntime of current thread
-                
-                let current_entity_tid = current_entity.thread().id();
-
-                self.update_current();
-                
-                let next = Scheduler::current(&state);
-                let next_tid = next.thread().id();
-
-                if current_entity_tid == next_tid {
-                    // Current thread is still the same, so we do not need to switch threads
-                    return false;
-                }
-
-                return true; // We can switch threads, because the current thread is not the same as the next thread
-
-            
-            } else {
-                return false; // No current thread, so we cannot switch threads
-            }
-            
-            
-        } else {
-            // Scheduler is not initialized yet, so we cannot switch threads
+        let mut state = self.get_ready_state();
+        let now = timer().systime_ms();
+        if now - state.last_switch_time < 11 {
             return false;
         }
+
+        if !state.initialized {
+            return false;
+        }
+
+        info!("Switching thread at time: {}", now);
+        state.last_switch_time = now;
+
+        let current_tid = state.current.as_ref().map(|rc| rc.thread().id()).unwrap_or(0);
+        
+
+        self.update_current(&mut state);
+        
+        info!("After update_current");
+        let next = Scheduler::current(&state);
+        let next_tid = next.thread().id();
+
+
+        if current_tid == next_tid {
+            return false;
+        }
+        true
 
     }
 
@@ -585,57 +570,44 @@ impl Scheduler {
     // David:
     // Updated die virtual Runtime des aktuellen Threads indem:
     // (deltaExecTime × NICE_0_WEIGHT)/weight_schedule_entity
-    fn update_current(&self) {
+    fn update_current(&self, state: &mut ReadyState) {
+        info!("Updating current entity vruntime");
         
-        let now = timer().systime_ns();
-        let mut state = self.get_ready_state();
-        let mut current = state.current.take();
-        let rb_tree = &mut state.rb_tree;
 
-
-        // Direkter mutabler Zugriff auf current
-        let Some(current_rc) = current.as_mut() else {
+        let Some(current_rc) = state.current.as_mut() else {
+            info!("update_current: No current_entity!");
             return;
         };
 
-        let current = Rc::get_mut(current_rc);
-        if current.is_none() {
-            return; // Rc ist geteilt, kein exklusiver Zugriff möglich
-        }
+        let Some(current_entity) = Rc::get_mut(current_rc) else {
+            info!("update_current: No exclusive mutable!");
+            return;
+        };
 
-        let current = current.unwrap();
-
-        let delta_exec = now.saturating_sub(current.last_exec_time);
+        let now = timer().systime_ms();
+        let delta_exec = now.saturating_sub(current_entity.last_exec_time);
         if delta_exec == 0 {
             return;
         }
 
         const NICE_0_LOAD: usize = 1024;
-        let weight = current.weight;
+        let weight = current_entity.last_exec_time;
         let weighted_delta = delta_exec * NICE_0_LOAD / weight;
 
-        current.vruntime += weighted_delta;
-        current.last_exec_time = now;
-        
+        current_entity.vruntime += weighted_delta;
+        current_entity.last_exec_time = now;
 
-        // Lazar:
-        // If the current threads new vruntime is greater than the minimum vruntime in the rb_tree, we need to update the current entity
-        // => Insert current entity back into the rb_tree
-        // => Pop the smallest entity from the rb_tree and set it as current
         
-        
-        let mut binding = rb_tree.get_first().map(|(_key, value)| value.vruntime());
-        let min_vruntime = binding.as_mut().unwrap();
-        if current.vruntime > *min_vruntime {
-            // Insert current entity back into the rb_tree.get_first().map(|(_key, value)| value.vruntime()).as_mut().unwrap();
-            rb_tree.insert(current.vruntime, Rc::clone(current_rc));
+        let min_vruntime = state.rb_tree.get_first().map(|(_key, value)| value.vruntime()).unwrap_or(0);
+        // If current entity.vruntime is greater than the minimum vruntime in the tree, we need to swap current to the tree and next from tree to current
+        if current_entity.vruntime > min_vruntime {
 
-            // Pop the smallest entity from the rb_tree and set it as current
+            state.rb_tree.insert(current_entity.vruntime, Rc::clone(state.current.as_ref().unwrap()));
+
             if let Some((_, next_entity)) = state.rb_tree.pop_first() {
                 state.current = Some(next_entity);
             }
         }
-
     }
 
 
@@ -702,10 +674,12 @@ impl Scheduler {
     }
 
 
+
+
     // David:
     // Methode, die prüft, ob die Zeitscheibe für einen Thread abgelaufen ist. Wenn ja, füge den Thread wieder in den Baum ein.
     fn entity_tick(&self, total_weight: usize, nr_running: usize) {
-        self.update_current();
+        //self.update_current();
 
         let state = self.get_ready_state();
 
@@ -720,7 +694,7 @@ impl Scheduler {
         let weight = entity.weight;
         let sched_slice = self.sched_slice(weight, total_weight, nr_running);
 
-        let now = timer().systime_ns();
+        let now = timer().systime_ms();
         let delta_exec = now.saturating_sub(entity.last_exec_time);
 
         if delta_exec > sched_slice {
