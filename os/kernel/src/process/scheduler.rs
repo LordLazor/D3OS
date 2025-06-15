@@ -71,8 +71,7 @@ impl SchedulingEntity {
         // current system time in nanoseconds
         let current_time = timer().systime_ms();
         let nice = 0; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
-        //let weight = CfsScheduler::nice_to_weight(nice) as usize
-        let weight = 0;
+        let weight = Scheduler::nice_to_weight(nice) as usize; //Gewicht richtig setzen um richtig damit rechnen zu können
         Self {
             vruntime: current_time,
             nice: nice as usize,
@@ -294,35 +293,41 @@ impl Scheduler {
     // if true: return false, because the current thread should not be switched out
     // if false: return true and insert old current into tree, because the current thread should be switched out
     fn check_switch_thread(&self) -> bool {
+        info!("In check_switch_thread");
+        if let Some(mut state) = self.ready_state.try_lock() {
+            info!("nach state");
+            let now = timer().systime_ms();
+            if now - state.last_switch_time < 11 {
+                info!("Zu wenig Zeit vergangen für einen switch");
+                return false;
+            }
+
+            if !state.initialized {
+                return false;
+            }
+
+            info!("Switching thread at time: {}", now);
+            state.last_switch_time = now;
+
+            let current_tid = state.current.as_ref().map(|rc| rc.thread().id()).unwrap_or(0);
         
-        let mut state = self.get_ready_state();
-        let now = timer().systime_ms();
-        if now - state.last_switch_time < 11 {
-            return false;
-        }
 
-        if !state.initialized {
-            return false;
-        }
-
-        info!("Switching thread at time: {}", now);
-        state.last_switch_time = now;
-
-        let current_tid = state.current.as_ref().map(|rc| rc.thread().id()).unwrap_or(0);
+            self.update_current(&mut state);
         
-
-        self.update_current(&mut state);
-        
-        info!("After update_current");
-        let next = Scheduler::current(&state);
-        let next_tid = next.thread().id();
+            info!("After update_current");
+            let next = Scheduler::current(&state);
+            let next_tid = next.thread().id();
 
 
-        if current_tid == next_tid {
-            return false;
+            if current_tid == next_tid {
+                return false;
+            }
+            true
         }
-        true
-
+        else {
+            info!("kein lock bekommen in check_switch_thread");
+            false
+        }
     }
 
     /// Description: helper function, calling `switch_thread`
@@ -591,9 +596,11 @@ impl Scheduler {
         }
 
         const NICE_0_LOAD: usize = 1024;
-        let weight = current_entity.last_exec_time;
-        let weighted_delta = delta_exec * NICE_0_LOAD / weight;
-
+        //let weight = current_entity.last_exec_time;
+        let weight = current_entity.weight;
+        //let weighted_delta = delta_exec * NICE_0_LOAD / weight;
+        let weighted_delta = delta_exec / weight;   // Ohne NICE_0_LOAD zur vereinfachung
+        
         current_entity.vruntime += weighted_delta;
         current_entity.last_exec_time = now;
 
