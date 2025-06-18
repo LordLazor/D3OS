@@ -266,8 +266,16 @@ impl Scheduler {
                 None => return,
             };
 
+
+
             // Current thread is initializing itself and may not be interrupted
             if current.thread().stacks_locked() || tss().is_locked() {
+                return;
+            }
+
+            if current.vruntime() < next.vruntime() {
+                // Current thread has a smaller vruntime than the next thread, so we do not switch
+                state.rb_tree.insert(next.vruntime(), next);
                 return;
             }
 
@@ -293,12 +301,12 @@ impl Scheduler {
     // if true: return false, because the current thread should not be switched out
     // if false: return true and insert old current into tree, because the current thread should be switched out
     fn check_switch_thread(&self) -> bool {
-        info!("In check_switch_thread");
+
         if let Some(mut state) = self.ready_state.try_lock() {
-            info!("nach state");
+
             let now = timer().systime_ms();
             if now - state.last_switch_time < 11 {
-                info!("Zu wenig Zeit vergangen für einen switch");
+
                 return false;
             }
 
@@ -306,26 +314,21 @@ impl Scheduler {
                 return false;
             }
 
-            info!("Switching thread at time: {}", now);
+            
             state.last_switch_time = now;
 
             let current_tid = state.current.as_ref().map(|rc| rc.thread().id()).unwrap_or(0);
         
-
+            //info!("Updating Thread vruntime for thread ID: {}", current_tid);
+            let from_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
             self.update_current(&mut state);
-        
-            info!("After update_current");
-            let next = Scheduler::current(&state);
-            let next_tid = next.thread().id();
+            let to_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
+            //info!("Updated Thread vruntime from {} to {}", from_vruntime, to_vruntime);
 
-
-            if current_tid == next_tid {
-                return false;
-            }
             true
         }
         else {
-            info!("kein lock bekommen in check_switch_thread");
+            //info!("kein lock bekommen in check_switch_thread");
             false
         }
     }
@@ -576,7 +579,7 @@ impl Scheduler {
     // Updated die virtual Runtime des aktuellen Threads indem:
     // (deltaExecTime × NICE_0_WEIGHT)/weight_schedule_entity
     fn update_current(&self, state: &mut ReadyState) {
-        info!("Updating current entity vruntime");
+        //info!("Updating current entity vruntime");
         
 
         let Some(current_rc) = state.current.as_mut() else {
@@ -598,23 +601,25 @@ impl Scheduler {
         const NICE_0_LOAD: usize = 1024;
         //let weight = current_entity.last_exec_time;
         let weight = current_entity.weight;
-        //let weighted_delta = delta_exec * NICE_0_LOAD / weight;
-        let weighted_delta = delta_exec / weight;   // Ohne NICE_0_LOAD zur vereinfachung
+        let weighted_delta = delta_exec * NICE_0_LOAD / weight;
+        //let weighted_delta = delta_exec / weight;   // Ohne NICE_0_LOAD zur vereinfachung
         
         current_entity.vruntime += weighted_delta;
         current_entity.last_exec_time = now;
 
         
-        let min_vruntime = state.rb_tree.get_first().map(|(_key, value)| value.vruntime()).unwrap_or(0);
+        /*let min_vruntime = state.rb_tree.get_first().map(|(_key, value)| value.vruntime()).unwrap_or(0);
         // If current entity.vruntime is greater than the minimum vruntime in the tree, we need to swap current to the tree and next from tree to current
         if current_entity.vruntime > min_vruntime {
+            info!("Hier");
 
             state.rb_tree.insert(current_entity.vruntime, Rc::clone(state.current.as_ref().unwrap()));
 
             if let Some((_, next_entity)) = state.rb_tree.pop_first() {
                 state.current = Some(next_entity);
             }
-        }
+        } */
+        
     }
 
 
