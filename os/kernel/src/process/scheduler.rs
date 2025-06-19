@@ -496,9 +496,42 @@ impl Scheduler {
     }
 
 
-    /// Lazar Konstantinou:
-    /// Checks the sleep list for threads that are ready to be woken up and inserts them into the CFS tree.
+    /// Lazar Konstantinou und David:
+    /// Checks the sleep list for threads that are ready to be woken up and inserts them into the CFS tree. 
+    /// The vruntime should be set to the minimum of all vruntimes if it was the smallest
     fn check_sleep_list(state: &mut ReadyState, sleep_list: &mut Vec<(Rc<SchedulingEntity>, usize)>) {
+        let time = timer().systime_ms();
+
+        let mut to_reinsert = Vec::new();
+        // Speichern alle Threads die aufwachen sollen
+        sleep_list.retain(|(entity, wake_time)| {
+            if time >= *wake_time {
+                to_reinsert.push(Rc::clone(entity));
+                false
+            } else {
+                true
+            }
+        });
+        // Prüfen für jeden aufwachenden Thread, ob seine vruntime kleiner ist, als die aktuell kleinste im Baum. 
+        // Falls ja, setzte sie auf die kleinste aus dem Baum und füge ihn dort ein
+        for entity in to_reinsert {
+            // min_vruntime berechnen
+            let min_vruntime = state.rb_tree.get_first().map(|(key, _)| *key).unwrap_or(0);
+
+            // entity.vruntime ggf. anpassen
+            if entity.vruntime() < min_vruntime {
+                if let Some(mut_entity) = Rc::get_mut(&mut Rc::clone(&entity)) {
+                    let old_vruntime = entity.vruntime();   // nur zum testen
+                    mut_entity.set_vruntime(min_vruntime);
+                    info!("[CFS] Thread {} wurde aufgeweckt: vruntime angepasst von {} auf {}", entity.thread().id(), old_vruntime, min_vruntime); // nur zum testen
+                } 
+            }
+
+            state.rb_tree.insert(entity.vruntime(), entity);
+        }
+        
+        // Vorheriger Code:
+        /*
         let time = timer().systime_ms();
 
         sleep_list.retain(|entry| {
@@ -510,6 +543,8 @@ impl Scheduler {
 
             return true;
         });
+        */
+
     }
 
 
