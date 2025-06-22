@@ -317,12 +317,12 @@ impl Scheduler {
             
             state.last_switch_time = now;
 
-            let current_tid = state.current.as_ref().map(|rc| rc.thread().id()).unwrap_or(0);
+            //let current_tid = state.current.as_ref().map(|rc| rc.thread().id()).unwrap_or(0);
         
             //info!("Updating Thread vruntime for thread ID: {}", current_tid);
-            let from_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
+            //let from_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
             self.update_current(&mut state);
-            let to_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
+            //let to_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
             //info!("Updated Thread vruntime from {} to {}", from_vruntime, to_vruntime);
 
             true
@@ -629,31 +629,22 @@ impl Scheduler {
 
         let now = timer().systime_ms();
         let delta_exec = now.saturating_sub(current_entity.last_exec_time);
-        if delta_exec == 0 {
+        if delta_exec <= 0 {
             return;
         }
 
-        const NICE_0_LOAD: usize = 1024;
-        //let weight = current_entity.last_exec_time;
-        let weight = current_entity.weight;
+        const NICE_0_LOAD: usize = 1024; // Standard Value for NICE_0_LOAD in CFS scheduler  
+    
+        // Virtual runtime update formula:
+        // vruntime_new​=vruntime_old​+Δt*NICE_0_LOAD​/weight
+
+        // Nice > 0 lower priority, Nice < 0 higher priority
+        let weight = Scheduler::nice_to_weight(current_entity.nice as i32) as usize; // Nice currently always 0, so weight is always 1024
+
         let weighted_delta = delta_exec * NICE_0_LOAD / weight;
-        //let weighted_delta = delta_exec / weight;   // Ohne NICE_0_LOAD zur vereinfachung
         
-        current_entity.vruntime += weighted_delta;
+        current_entity.vruntime += weighted_delta; // vruntime_old + weighted_delta
         current_entity.last_exec_time = now;
-
-        
-        /*let min_vruntime = state.rb_tree.get_first().map(|(_key, value)| value.vruntime()).unwrap_or(0);
-        // If current entity.vruntime is greater than the minimum vruntime in the tree, we need to swap current to the tree and next from tree to current
-        if current_entity.vruntime > min_vruntime {
-            info!("Hier");
-
-            state.rb_tree.insert(current_entity.vruntime, Rc::clone(state.current.as_ref().unwrap()));
-
-            if let Some((_, next_entity)) = state.rb_tree.pop_first() {
-                state.current = Some(next_entity);
-            }
-        } */
         
     }
 

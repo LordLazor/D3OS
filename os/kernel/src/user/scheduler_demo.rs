@@ -9,8 +9,9 @@ pub fn spawn_demo_thread() {
     // ent 1
     let thread = Thread::new_kernel_thread(
         || {
-            //scheduler().sleep(500);
+            
             for i in 0..5 {
+                scheduler().sleep(5000);
                 log::info!("Thread {} arbeitet: {}", scheduler().current_thread().id(), i);
             }
         },
@@ -22,7 +23,7 @@ pub fn spawn_demo_thread() {
     // ent 2
     let thread2 = Thread::new_kernel_thread(
         || {
-            //scheduler().sleep(500);
+            scheduler().sleep(5000);
             for i in 0..5 {
                 log::info!("Thread {} arbeitet: {}", scheduler().current_thread().id(), i);
             }
@@ -34,10 +35,11 @@ pub fn spawn_demo_thread() {
     // ent 3
     let thread3 = Thread::new_kernel_thread(
         || {
-            //scheduler().sleep(500);
+            scheduler().sleep(5000);
             for i in 0..5 {
                 log::info!("Thread {} arbeitet: {}", scheduler().current_thread().id(), i);
             }
+
         },
         "test_thread3",
     );
@@ -46,7 +48,7 @@ pub fn spawn_demo_thread() {
     // ent 4
     let thread4 = Thread::new_kernel_thread(
         || {
-            //scheduler().sleep(500);
+            scheduler().sleep(5000);
             for i in 0..5 {
                 log::info!("Thread {} arbeitet: {}", scheduler().current_thread().id(), i);
             }
@@ -59,12 +61,9 @@ pub fn spawn_demo_thread() {
 
     let cfs = scheduler();
     cfs.ready(thread);
-    cfs.ready(thread2);
-    cfs.ready(thread3);
-    cfs.ready(thread4);
+    //cfs.ready(thread2);
+    //cfs.ready(thread3);
+    //cfs.ready(thread4);
 
-    cfs.kill(5);
 
-    info!("Spawning thread:");
-    //scheduler().ready(thread);
 }
