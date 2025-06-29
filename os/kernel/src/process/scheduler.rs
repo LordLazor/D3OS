@@ -28,6 +28,7 @@ pub fn next_thread_id() -> usize {
 
 
 struct ReadyState {
+    sched_period: usize, // in nanoseconds
     initialized: bool,
     last_switch_time: usize,
     rb_tree: RBTree<usize, Rc<SchedulingEntity>>,
@@ -69,7 +70,7 @@ impl SchedulingEntity {
      */
     pub fn new(thread: Rc<Thread>) -> Self {
         // current system time in nanoseconds
-        let current_time = timer().systime_ms();
+        let current_time = timer().systime_ns();
         let nice = 0; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
         let weight = Scheduler::nice_to_weight(nice) as usize; //Gewicht richtig setzen um richtig damit rechnen zu können
         Self {
@@ -110,6 +111,7 @@ impl Scheduler {
     pub fn new() -> Self {
         Self {
             ready_state: Mutex::new(ReadyState {
+                sched_period: 6_000_000, // 6 ms
                 initialized: false,
                 last_switch_time: 0,
                 rb_tree: RBTree::new(),
@@ -217,21 +219,14 @@ impl Scheduler {
         let use_old = true;
 
         if use_old {
-            entity_v_runtime = timer().systime_ms();
+            entity_v_runtime = timer().systime_ns();
         }
         else {
-            if state.current.is_none() && state.rb_tree.len() == 0 {
+            if state.rb_tree.len() == 0 {
                 // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
-                entity_v_runtime = timer().systime_ms();
-            } else if state.current.is_none() && state.rb_tree.len() > 0 {
-                // If something inside the rb_tree but nothing in current then get_first vruntime inside rb_tree + offset (1)
-                entity_v_runtime = state.rb_tree.get_first().map(|(key, _)| *key + 1).unwrap();    
-            } else if state.current.is_some() && state.rb_tree.len() == 0 {
-                // If something inside current then get current vruntime + offset (1)
-                entity_v_runtime = state.current.as_ref().unwrap().vruntime() + 1;
+                entity_v_runtime = timer().systime_ns();
             } else {
-                // current and rbtree have something inside then take the minimum vruntime from tree + offset (1)
-                entity_v_runtime = state.rb_tree.get_first().map(|(key, _)| *key + 1).unwrap();   
+                entity_v_runtime = self.calculatedSchedVSlice(&state);
             }
         }
         entity_struct.set_vruntime(entity_v_runtime);
@@ -239,6 +234,13 @@ impl Scheduler {
 
         state.rb_tree.insert(entity.vruntime(), entity);
         join_map.insert(id, Vec::new());
+    }
+ 
+    // Lazar
+    fn calculatedSchedVSlice(&self, state: &MutexGuard<ReadyState>) -> usize {
+        // Formula: (current_period*thread_weight)/sum(all_thread_weights)
+        0
+         
     }
 
     /// Description: Put calling thread to sleep for `ms` milliseconds
@@ -333,16 +335,17 @@ impl Scheduler {
                 return false;
             }
 
-            let now = timer().systime_ms();
+            let now = timer().systime_ns();
             let rb_tree_len = state.rb_tree.len();
             if rb_tree_len == 0 {
                 // No threads in the ready queue, so we dont need to switch
                 return false;
             }
 
-            let period_time = (6 as f64 / rb_tree_len as f64).max(0.75 as f64); 
-            
-            if (now as f64) - (state.last_switch_time as f64) < period_time {
+            let period_time = (6_000_000 / rb_tree_len).max(750_000);
+            state.sched_period = period_time as usize;
+
+            if now - state.last_switch_time < period_time {
                 return false;
             }
 
@@ -545,30 +548,12 @@ impl Scheduler {
             // entity.vruntime ggf. anpassen
             if entity.vruntime() < min_vruntime {
                 if let Some(mut_entity) = Rc::get_mut(&mut Rc::clone(&entity)) {
-                    let old_vruntime = entity.vruntime();   // nur zum testen
                     mut_entity.set_vruntime(min_vruntime);
-                    info!("[CFS] Thread {} wurde aufgeweckt: vruntime angepasst von {} auf {}", entity.thread().id(), old_vruntime, min_vruntime); // nur zum testen
                 } 
             }
 
             state.rb_tree.insert(entity.vruntime(), entity);
         }
-        
-        // Vorheriger Code:
-        /*
-        let time = timer().systime_ms();
-
-        sleep_list.retain(|entry| {
-            if time >= entry.1 {
-                
-                state.rb_tree.insert(entry.0.vruntime(), Rc::clone(&entry.0));
-                return false;
-            }
-
-            return true;
-        });
-        */
-
     }
 
 
@@ -651,7 +636,7 @@ impl Scheduler {
             return;
         };
 
-        let now = timer().systime_ms();
+        let now = timer().systime_ns();
         let delta_exec = now.saturating_sub(current_entity.last_exec_time);
         if delta_exec <= 0 {
             return;
