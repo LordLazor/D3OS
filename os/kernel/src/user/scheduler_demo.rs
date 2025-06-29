@@ -60,7 +60,7 @@ pub fn spawn_demo_thread() {
 
 
     let cfs = scheduler();
-    cfs.ready(thread);
+    cfs.ready(thread, 0);
     //cfs.ready(thread2);
     //cfs.ready(thread3);
     //cfs.ready(thread4);

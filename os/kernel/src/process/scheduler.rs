@@ -68,10 +68,10 @@ impl SchedulingEntity {
         Lazar Konstantinou und David:
         Creates a new CfsSchedulingEntity instance for a given thread    
      */
-    pub fn new(thread: Rc<Thread>) -> Self {
+    pub fn new(thread: Rc<Thread>, nice: i32) -> Self {
         // current system time in nanoseconds
         let current_time = timer().systime_ns();
-        let nice = 0; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
+        let nice = nice; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
         let weight = Scheduler::nice_to_weight(nice) as usize; //Gewicht richtig setzen um richtig damit rechnen zu können
         Self {
             vruntime: 0,
@@ -188,13 +188,13 @@ impl Scheduler {
     /// Changes for the cfs scheduler as using the join map correctly
     /// Important: ready() gets a thread and creates a new SchedulingEntity for it.
     /// Also initialized the virtual runtime here
-    pub fn ready(&self, thread: Rc<Thread>) {
+    pub fn ready(&self, thread: Rc<Thread>, nice: i32) {
         let id = thread.id();
         let mut join_map;
         let mut state;
 
         // We need to create a new SchedulingEntity wrapper for the thread when beeing inserted into the scheduler
-        let mut entity_struct: SchedulingEntity = SchedulingEntity::new(thread);
+        let mut entity_struct: SchedulingEntity = SchedulingEntity::new(thread, nice);
 
 
         // If we get the lock on 'self.state' but not on 'self.join_map' the system hangs.
@@ -214,26 +214,20 @@ impl Scheduler {
                 self.switch_thread_no_interrupt();
             }
         }
-
-        let entity_v_runtime: usize;
-        let use_old = true;
-
-        if use_old {
-            entity_v_runtime = timer().systime_ns();
-        }
-        else {
-            if state.rb_tree.len() == 0 {
-                // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
-                entity_v_runtime = timer().systime_ns();
-            } else {
-                let weight = entity_struct.weight;
-                let sum_weights: usize = state.rb_tree.iter()
-                    .map(|(_, entity)| entity.weight)
-                    .sum();
-                entity_v_runtime = self.calculated_sched_vslice(&state, weight, sum_weights);
-            }
-        }
-        entity_struct.set_vruntime(entity_v_runtime);
+        //entity_struct.vruntime = timer().systime_ns(); 
+        
+        /* Something is wrong inside this code block but idk what => This should be the correct logic for cfs */
+        if state.rb_tree.len() == 0 {
+            // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
+            entity_struct.vruntime  = 0;
+        } else {
+            let weight = entity_struct.weight;
+            let sum_weights: usize = state.rb_tree.iter()
+                .map(|(_, entity)| entity.weight)
+                .sum();
+            entity_struct.vruntime = self.calculated_sched_vslice(&state, weight, sum_weights);
+        }    
+        
         let entity = Rc::new(entity_struct);
 
         state.rb_tree.insert(entity.vruntime(), entity);
@@ -262,11 +256,6 @@ impl Scheduler {
                 let mut sleep_list = self.sleep_list.lock();
                 sleep_list.push((thread, wakeup_time));
             }
-
-            // TODO
-            // Wenn Thread geschlafen hat muss noch die vruntime aktualisiert werden
-            // Da muss dann fair eingereiht ggf., weil seine vruntime ggf. sehr klein ist und dann dauerthaft laufen darf
-            // David's vorschlag: mean-virtualruntime
 
             self.block(&mut state);
         }
@@ -351,8 +340,6 @@ impl Scheduler {
             if now - state.last_switch_time < period_time {
                 return false;
             }
-
-            state.last_switch_time = now;
 
             self.update_current(&mut state);
 
@@ -544,14 +531,22 @@ impl Scheduler {
         });
         // Prüfen für jeden aufwachenden Thread, ob seine vruntime kleiner ist, als die aktuell kleinste im Baum. 
         // Falls ja, setzte sie auf die kleinste aus dem Baum und füge ihn dort ein
+        // Also there need to be a small epsilon which is beeing subtracted (we use 1 here as epsilon)
         for entity in to_reinsert {
-            // min_vruntime berechnen
             let min_vruntime = state.rb_tree.get_first().map(|(key, _)| *key).unwrap_or(0);
 
-            // entity.vruntime ggf. anpassen
+            // Formula here is vruntime = max(vruntime, min_vruntime - epsilon)
             if entity.vruntime() < min_vruntime {
                 if let Some(mut_entity) = Rc::get_mut(&mut Rc::clone(&entity)) {
-                    mut_entity.set_vruntime(min_vruntime);
+
+                    if min_vruntime > 0 {
+                        // Set the vruntime to the minimum vruntime minus 1, so that it is smaller than the minimum
+                        // This is to ensure that the entity is scheduled before any other entity with the same vr as it slept unlike others in the tree
+                        mut_entity.set_vruntime(min_vruntime - 1);
+                    } else {
+                        // Edge case so we can't get into negative vruntimes as it destroys the logic
+                        mut_entity.set_vruntime(min_vruntime);
+                    }
                 } 
             }
 
@@ -640,6 +635,7 @@ impl Scheduler {
         };
 
         let now = timer().systime_ns();
+        state.last_switch_time = now;
         let delta_exec = now.saturating_sub(current_entity.last_exec_time);
         if delta_exec <= 0 {
             return;
@@ -651,132 +647,10 @@ impl Scheduler {
         // vruntime_new​=vruntime_old​+Δt*NICE_0_LOAD​/weight
 
         // Nice > 0 lower priority, Nice < 0 higher priority
-        let weight = Scheduler::nice_to_weight(current_entity.nice as i32) as usize; // Nice currently always 0, so weight is always 1024
-
-        let weighted_delta = delta_exec * NICE_0_LOAD / weight;
+        let weighted_delta = delta_exec * NICE_0_LOAD / current_entity.weight;
         
         current_entity.vruntime += weighted_delta; // vruntime_old + weighted_delta
         current_entity.last_exec_time = now;
         
     }
-
-
-    // David:
-    // Nimmt den Thread mit kleinster vruntime aus dem Baum
-    fn pick_next_entity(&self) -> Option<Rc<SchedulingEntity>> {
-        let state = self.get_ready_state();
-        
-        state.rb_tree.get_first().map(|(_key, value)| Rc::clone(value))
-    }
-
-    // David:
-    // Berechnet die initiale vruntime mithilfe der min_vruntime und des aktuellen sched_vslice
-    fn place_entity(&self, min_vruntime: usize, sched_vslice: usize) -> usize {
-        min_vruntime + sched_vslice
-    }
-
-    // David:
-    // Fügt laufenden Thread nach Ende seiner Zeitscheibe wieder in den Baum ein.
-    // Nicht identisch zu ready(), da dort ein neuer Thread mit neu berechneter vruntime eingefügt wird
-    fn put_prev_entity(&self) {
-        let mut state = self.get_ready_state();
-
-        // Clone current entity
-        let current_entity = state.current.as_ref().map(Rc::clone);
-        if current_entity.is_none() {
-            return;
-        }
-
-        if let Some(entity) = current_entity {
-
-            state.rb_tree.insert(entity.vruntime(), entity);
-        }
-    }
-
-
-    // David:
-    // Gibt die kleinste vruntime aller laufbereiten Threads zurück
-    // Wird für faire vruntime neuer Threads benötigt, damit diese weder benachteiligt noch bevorzugt werden
-    // Threads erhalten dann, vruntime: min_vruntime + sched_vslice
-    fn min_vruntime(&self) -> usize {
-        let state = self.get_ready_state();
-
-        // Clone current entity
-        let current_entity = state.current.as_ref().map(Rc::clone);
-        if current_entity.is_none() {
-            return 0;
-        }
-
-        let curr_vruntime = current_entity.as_ref().map(|e| e.vruntime()); //vruntime vom aktuellen Thread
-
-
-        let rb_tree = &state.rb_tree;
-        let min_entity = rb_tree.get_first().map(|(_, e)| e.vruntime()); //kleinste vruntime aus dem Baum
-
-
-
-        match (min_entity, curr_vruntime) { //gebe die kleinste vruntime zurück
-            (Some(a), Some(b)) => a.min(b),
-            (Some(a), None) => a,
-            (None, Some(b)) => b,
-            (None, None) => 0,
-        }
-    }
-
-
-
-
-    // David:
-    // Methode, die prüft, ob die Zeitscheibe für einen Thread abgelaufen ist. Wenn ja, füge den Thread wieder in den Baum ein.
-    fn entity_tick(&self, total_weight: usize, nr_running: usize) {
-        //self.update_current();
-
-        let state = self.get_ready_state();
-
-        let current_entity = state.current.as_ref().map(Rc::clone);
-        if current_entity.is_none() {
-            return;
-        }
-        let Some(entity) = current_entity.as_ref() else {
-            return;
-        };
-
-        let weight = entity.weight;
-        let sched_slice = self.sched_slice(weight, total_weight, nr_running);
-
-        let now = timer().systime_ms();
-        let delta_exec = now.saturating_sub(entity.last_exec_time);
-
-        if delta_exec > sched_slice {
-            drop(current_entity);
-            self.put_prev_entity();
-        }
-    }
-    
-    // Provisorische sched_slice Methode, die eine Konstante zurückgibt und unter anderem in entity_tick aufgerufen wird
-    fn sched_slice(&self, weight: usize, total_weight: usize, nr_running: usize) -> usize {
-        6_000_000 // 6 ms
-    }
-
-    
-    // Lazar Konstantinou:
-    // Brauchen wir diese Methode überhaupt?
-    // Habe auch noch was daran gefixt, weil etwas nicht mehr funktioniert hat
-    // David:
-    // Methode soll immer dann aufgerufen werden, wenn ein Thread durchgelaufen ist. 
-    // Sie überprüft dann, ob Threads die vorher in der join map auf beendigung von Threads warten mussten, wieder in die ready_queue dürfen. 
-    pub fn on_thread_exit(&self, thread_id: usize) {
-        let mut join_map = self.join_map.lock();
-        if let Some(waiters) = join_map.remove(&thread_id) {
-            //info!("on_thread_exit locks rb_tree");
-            let mut state = self.ready_state.lock();
-
-            let rb_tree = &mut state.rb_tree;
-            for waiter in waiters {
-                rb_tree.insert(waiter.vruntime(), waiter);
-            }
-        }
-    }
-
-
 }
