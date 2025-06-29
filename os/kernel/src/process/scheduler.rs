@@ -226,7 +226,11 @@ impl Scheduler {
                 // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
                 entity_v_runtime = timer().systime_ns();
             } else {
-                entity_v_runtime = self.calculatedSchedVSlice(&state);
+                let weight = entity_struct.weight;
+                let sum_weights: usize = state.rb_tree.iter()
+                    .map(|(_, entity)| entity.weight)
+                    .sum();
+                entity_v_runtime = self.calculated_sched_vslice(&state, weight, sum_weights);
             }
         }
         entity_struct.set_vruntime(entity_v_runtime);
@@ -237,10 +241,9 @@ impl Scheduler {
     }
  
     // Lazar
-    fn calculatedSchedVSlice(&self, state: &MutexGuard<ReadyState>) -> usize {
+    fn calculated_sched_vslice(&self, state: &MutexGuard<ReadyState>, entity_weight: usize, sum_entities_weight: usize) -> usize {
         // Formula: (current_period*thread_weight)/sum(all_thread_weights)
-        0
-         
+        (state.sched_period * entity_weight) / sum_entities_weight
     }
 
     /// Description: Put calling thread to sleep for `ms` milliseconds
