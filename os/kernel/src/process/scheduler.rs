@@ -304,31 +304,30 @@ impl Scheduler {
 
         if let Some(mut state) = self.ready_state.try_lock() {
 
-            let now = timer().systime_ms();
-            if now - state.last_switch_time < 11 {
-
-                return false;
-            }
-
             if !state.initialized {
                 return false;
             }
 
+            let now = timer().systime_ms();
+            let rb_tree_len = state.rb_tree.len();
+            if rb_tree_len == 0 {
+                // No threads in the ready queue, so we dont need to switch
+                return false;
+            }
+
+            let period_time = (6 as f64 / rb_tree_len as f64).max(0.75 as f64); 
             
+            if (now as f64) - (state.last_switch_time as f64) < period_time {
+                return false;
+            }
+
             state.last_switch_time = now;
 
-            //let current_tid = state.current.as_ref().map(|rc| rc.thread().id()).unwrap_or(0);
-        
-            //info!("Updating Thread vruntime for thread ID: {}", current_tid);
-            //let from_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
             self.update_current(&mut state);
-            //let to_vruntime = state.current.as_ref().map_or(0, |e| e.vruntime());
-            //info!("Updated Thread vruntime from {} to {}", from_vruntime, to_vruntime);
 
             true
         }
         else {
-            //info!("kein lock bekommen in check_switch_thread");
             false
         }
     }
@@ -610,7 +609,7 @@ impl Scheduler {
     }
 
 
-    // David:
+    // Lazar:
     // Updated die virtual Runtime des aktuellen Threads indem:
     // (deltaExecTime × NICE_0_WEIGHT)/weight_schedule_entity
     fn update_current(&self, state: &mut ReadyState) {
