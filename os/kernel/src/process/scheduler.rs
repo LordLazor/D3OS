@@ -216,7 +216,6 @@ impl Scheduler {
         }
         //entity_struct.vruntime = timer().systime_ns(); 
         
-        /* Something is wrong inside this code block but idk what => This should be the correct logic for cfs */
         if state.rb_tree.len() == 0 {
             // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
             entity_struct.vruntime  = 0;
