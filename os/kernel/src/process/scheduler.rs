@@ -73,7 +73,7 @@ impl SchedulingEntity {
         let nice = 0; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
         let weight = Scheduler::nice_to_weight(nice) as usize; //Gewicht richtig setzen um richtig damit rechnen zu können
         Self {
-            vruntime: current_time,
+            vruntime: 0,
             nice: nice as usize,
             last_exec_time: current_time,
             weight: weight,
@@ -186,7 +186,7 @@ impl Scheduler {
     /// Changes for the cfs scheduler as using the join map correctly
     /// Important: ready() gets a thread and creates a new SchedulingEntity for it.
     /// Also initialized the virtual runtime here
-    /*pub fn ready(&self, thread: Rc<Thread>) {
+    pub fn ready(&self, thread: Rc<Thread>) {
         let id = thread.id();
         let mut join_map;
         let mut state;
@@ -214,53 +214,28 @@ impl Scheduler {
         }
 
         let entity_v_runtime: usize;
+        let use_old = true;
 
-        if state.current.is_none() && state.rb_tree.len() == 0 {
-            // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
-            entity_v_runtime = 1;
-        } else if state.current.is_none() && state.rb_tree.len() > 0 {
-            // If something inside the rb_tree but nothing in current then get_first vruntime inside rb_tree + offset (1)
-            entity_v_runtime = state.rb_tree.get_first().map(|(key, _)| *key + 1).unwrap();    
-        } else if state.current.is_some() && state.rb_tree.len() == 0 {
-            // If something inside current then get current vruntime + offset (1)
-            entity_v_runtime = state.current.as_ref().unwrap().vruntime() + 1;
-        } else {
-            // current and rbtree have something inside then take the minimum vruntime from tree + offset (1)
-            entity_v_runtime = state.rb_tree.get_first().map(|(key, _)| *key + 1).unwrap();   
+        if use_old {
+            entity_v_runtime = timer().systime_ms();
         }
-
-        entity_struct.set_vruntime(entity_v_runtime);
-        let entity = Rc::new(entity_struct);
-
-        state.rb_tree.insert(entity.vruntime(), entity);
-        join_map.insert(id, Vec::new());
-    }*/
-    pub fn ready(&self, thread: Rc<Thread>) {
-        let id = thread.id();
-        let mut join_map;
-        let mut state;
-
-        // We need to create a new SchedulingEntity wrapper for the thread when beeing inserted into the scheduler
-        let entity = Rc::new(SchedulingEntity::new(thread));
-
-
-        // If we get the lock on 'self.state' but not on 'self.join_map' the system hangs.
-        // The scheduler is not able to switch threads anymore, because of 'self.state' is locked,
-        // and we will never be able to get the lock on 'self.join_map'.
-        // To solve this, we need to release the lock on 'self.state' in case we do not get
-        // the lock on 'self.join_map' and let the scheduler switch threads until we get both locks.
-        loop {
-            let state_mutex = self.get_ready_state();
-            let join_map_option = self.join_map.try_lock();
-
-            if join_map_option.is_some() {
-                state = state_mutex;
-                join_map = join_map_option.unwrap();
-                break;
+        else {
+            if state.current.is_none() && state.rb_tree.len() == 0 {
+                // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
+                entity_v_runtime = timer().systime_ms();
+            } else if state.current.is_none() && state.rb_tree.len() > 0 {
+                // If something inside the rb_tree but nothing in current then get_first vruntime inside rb_tree + offset (1)
+                entity_v_runtime = state.rb_tree.get_first().map(|(key, _)| *key + 1).unwrap();    
+            } else if state.current.is_some() && state.rb_tree.len() == 0 {
+                // If something inside current then get current vruntime + offset (1)
+                entity_v_runtime = state.current.as_ref().unwrap().vruntime() + 1;
             } else {
-                self.switch_thread_no_interrupt();
+                // current and rbtree have something inside then take the minimum vruntime from tree + offset (1)
+                entity_v_runtime = state.rb_tree.get_first().map(|(key, _)| *key + 1).unwrap();   
             }
         }
+        entity_struct.set_vruntime(entity_v_runtime);
+        let entity = Rc::new(entity_struct);
 
         state.rb_tree.insert(entity.vruntime(), entity);
         join_map.insert(id, Vec::new());
