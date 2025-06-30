@@ -65,7 +65,7 @@ static GLOBAL_VRUNTIME_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 impl SchedulingEntity {
     /*
-        Lazar Konstantinou und David:
+        Lazar Konstantinou and David Schwabauer:
         Creates a new CfsSchedulingEntity instance for a given thread    
      */
     pub fn new(thread: Rc<Thread>, nice: i32) -> Self {
@@ -184,40 +184,18 @@ impl Scheduler {
     /// 
     /// Parameters: `thread` thread to be inserted.
     /// 
-    /// Lazar Konstantinou:
+    /// Lazar Konstantinou and David Schwabauer:
     /// Changes for the cfs scheduler as using the join map correctly
     /// Important: ready() gets a thread and creates a new SchedulingEntity for it.
     /// Also initialized the virtual runtime here
     pub fn ready(&self, thread: Rc<Thread>, nice: i32) {
         let id = thread.id();
-        let mut join_map;
-        let mut state;
-
-        // We need to create a new SchedulingEntity wrapper for the thread when beeing inserted into the scheduler
+        // We need to create a new SchedulingEntity wrapper for the thread when being inserted into the scheduler
         let mut entity_struct: SchedulingEntity = SchedulingEntity::new(thread, nice);
+        let (mut state, mut join_map) = self.get_ready_state_and_join_map();
 
-
-        // If we get the lock on 'self.state' but not on 'self.join_map' the system hangs.
-        // The scheduler is not able to switch threads anymore, because of 'self.state' is locked,
-        // and we will never be able to get the lock on 'self.join_map'.
-        // To solve this, we need to release the lock on 'self.state' in case we do not get
-        // the lock on 'self.join_map' and let the scheduler switch threads until we get both locks.
-        loop {
-            let state_mutex = self.get_ready_state();
-            let join_map_option = self.join_map.try_lock();
-
-            if join_map_option.is_some() {
-                state = state_mutex;
-                join_map = join_map_option.unwrap();
-                break;
-            } else {
-                self.switch_thread_no_interrupt();
-            }
-        }
-        //entity_struct.vruntime = timer().systime_ns(); 
-        
         if state.rb_tree.len() == 0 {
-            // Nothing inside the scheduler init the first thread and set its vvruntime to 1 
+            // Nothing inside the scheduler init the first thread and set its vruntime to 1
             entity_struct.vruntime  = 0;
         } else {
             let weight = entity_struct.weight;
@@ -225,14 +203,13 @@ impl Scheduler {
                 .map(|(_, entity)| entity.weight)
                 .sum();
             entity_struct.vruntime = self.calculated_sched_vslice(&state, weight, sum_weights);
-        }    
-        
-        let entity = Rc::new(entity_struct);
+        }
 
+        let entity = Rc::new(entity_struct);
         state.rb_tree.insert(entity.vruntime(), entity);
         join_map.insert(id, Vec::new());
     }
- 
+    
     // Lazar
     fn calculated_sched_vslice(&self, state: &MutexGuard<ReadyState>, entity_weight: usize, sum_entities_weight: usize) -> usize {
         // Formula: (current_period*thread_weight)/sum(all_thread_weights)
@@ -267,7 +244,7 @@ impl Scheduler {
     ///                         false = no EOI needed
     /// 
     /// Lazar Konstantinou:
-    /// Changes for the cfs scheduler as using the rb tree correct 
+    /// Changes for the cfs scheduler as using the rb tree correct
     fn switch_thread(&self, interrupt: bool) {
         if let Some(mut state) = self.ready_state.try_lock() {
             if !state.initialized {
@@ -278,40 +255,51 @@ impl Scheduler {
                 Scheduler::check_sleep_list(&mut state, &mut sleep_list);
             }
 
-            let current = Scheduler::current(&state);
-            let next = match state.rb_tree.pop_first() {
-                Some((_, entity)) => entity,
-                None => return,
-            };
-
-
-
-            // Current thread is initializing itself and may not be interrupted
-            if current.thread().stacks_locked() || tss().is_locked() {
-                return;
-            }
-
-            if current.vruntime() < next.vruntime() {
-                // Current thread has a smaller vruntime than the next thread, so we do not switch
-                state.rb_tree.insert(next.vruntime(), next);
-                return;
-            }
-
-            let current_ptr = ptr::from_ref(current.thread().as_ref());
-            let next_ptr = ptr::from_ref(next.thread().as_ref());
-
-            state.current = Some(next);
-            state.rb_tree.insert(current.vruntime(), current);
-
-            if interrupt {
-                apic().end_of_interrupt();
-            }
-
-            unsafe {
-                Thread::switch(current_ptr, next_ptr);
+            if let Some((current, next)) = self.prepare_context_switch(&mut state) {
+                self.perform_context_switch(state, current, next, interrupt);
             }
         }
     }
+    
+    /// Checks if a context switch is needed and returns current and next thread
+    /// David Schwabauer:
+    fn prepare_context_switch(&self, state: &mut ReadyState) -> Option<(Rc<SchedulingEntity>, Rc<SchedulingEntity>)> {
+        let current = Scheduler::current(&state);
+        let next = match state.rb_tree.pop_first() {
+            Some((_, entity)) => entity,
+            None => return None,
+        };
+
+        if current.thread().stacks_locked() || tss().is_locked() {
+            return None;
+        }
+
+        if current.vruntime() < next.vruntime() {
+            // Current thread has a smaller vruntime than the next thread, so we do not switch
+            state.rb_tree.insert(next.vruntime(), next);
+            return None;
+        }
+        Some((current, next))
+    }
+
+    /// Performs the actual context switch between two threads
+    /// David Schwabauer: 
+    fn perform_context_switch(&self, mut state: MutexGuard<ReadyState>, current: Rc<SchedulingEntity>, next: Rc<SchedulingEntity>, interrupt: bool) {
+        let current_ptr = ptr::from_ref(current.thread().as_ref());
+        let next_ptr = ptr::from_ref(next.thread().as_ref());
+
+        state.current = Some(next);
+        state.rb_tree.insert(current.vruntime(), current);
+
+        if interrupt {
+            apic().end_of_interrupt();
+        }
+
+        unsafe {
+            Thread::switch(current_ptr, next_ptr);
+        }
+    }
+    
 
     // Lazar Konstantinou:
     // Update current thread's vruntime
@@ -351,11 +339,9 @@ impl Scheduler {
 
     /// Description: helper function, calling `switch_thread`
     pub fn switch_thread_no_interrupt(&self) {
-
         if self.check_switch_thread() {
             self.switch_thread(false);
         }
-        
     }
 
     /// Description: helper function, calling `switch_thread`
@@ -398,7 +384,6 @@ impl Scheduler {
     pub fn exit(&self) {
         let mut ready_state;
         let current;
-
         {
             // Execute in own block, so that join_map is released automatically (block() does not return)
             let state = self.get_ready_state_and_join_map();
@@ -406,18 +391,25 @@ impl Scheduler {
             let mut join_map = state.1;
 
             current = Scheduler::current(&ready_state);
-            let join_list = join_map.get_mut(&current.thread().id()).expect("Missing join_map entry!");
 
-            for entity in join_list {
-                ready_state.rb_tree.insert(entity.vruntime(),Rc::clone(entity));
-            }
-
-            join_map.remove(&current.thread().id());
+            self.reinsert_joined_threads(&mut ready_state, &mut join_map, current.thread().id());
         }
 
         drop(current); // Decrease Rc manually, because block() does not return
         self.block(&mut ready_state);
     }
+
+    /// Reinserts threads waiting for a terminated thread back into the scheduler.
+    /// David Schwabauer:
+    fn reinsert_joined_threads(&self, ready_state: &mut ReadyState, join_map: &mut Map<usize, Vec<Rc<SchedulingEntity>>>, thread_id: usize, ) {
+        let join_list = join_map.get_mut(&thread_id).expect("Missing join_map entry!");
+
+        for entity in join_list {
+            ready_state.rb_tree.insert(entity.vruntime(), Rc::clone(entity));
+        }
+        join_map.remove(&thread_id);
+    }
+
 
     /// 
     /// Description: Kill the thread with the  given id
@@ -512,7 +504,7 @@ impl Scheduler {
     }
 
 
-    /// Lazar Konstantinou und David:
+    /// Lazar Konstantinou and David Schwabauer:
     /// Checks the sleep list for threads that are ready to be woken up and inserts them into the CFS tree. 
     /// The vruntime should be set to the minimum of all vruntimes if it was the smallest
     fn check_sleep_list(state: &mut ReadyState, sleep_list: &mut Vec<(Rc<SchedulingEntity>, usize)>) {
