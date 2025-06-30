@@ -322,6 +322,7 @@ impl Scheduler {
             }
 
             let period_time = (6_000_000 / rb_tree_len).max(750_000);
+            //let period_time = 500_000;
             state.sched_period = period_time as usize;
 
             if now - state.last_switch_time < period_time {
