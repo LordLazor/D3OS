@@ -335,7 +335,7 @@ pub fn init_terminal(buffer: *mut u8, pitch: u32, width: u32, height: u32, bpp: 
             cursor_thread.run();
         },
         "cursor",
-    ), -10);
+    ), 0);
 }
 
 pub fn terminal_initialized() -> bool {

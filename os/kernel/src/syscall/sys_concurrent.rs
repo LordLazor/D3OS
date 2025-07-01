@@ -30,7 +30,7 @@ pub fn sys_thread_create(kickoff_addr: u64, entry: fn()) -> isize {
     let thread = Thread::new_user_thread(process_manager().read().current_process(), VirtAddr::new(kickoff_addr), entry);
     let id = thread.id();
 
-    scheduler().ready(thread, -5);
+    scheduler().ready(thread, 0);
     id as isize
 }
 
@@ -63,7 +63,7 @@ pub fn sys_process_execute_binary(name_buffer: *const u8, name_length: usize, ar
     match initrd().entries().find(|entry| entry.filename().as_str().unwrap() == app_name) {
         Some(app) => {
             let thread = Thread::load_application(app.data(), app_name, unsafe { args.as_ref().unwrap() });
-            scheduler().ready(Rc::clone(&thread), -5);
+            scheduler().ready(Rc::clone(&thread), 0);
             thread.id() as isize
         }
         None => Errno::ENOENT.into(),
