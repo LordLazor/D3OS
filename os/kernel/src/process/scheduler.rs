@@ -220,7 +220,7 @@ impl Scheduler {
     }
     
     // Lazar Konstantinou:
-    fn calculate_sched_period(&self, state: &mut MutexGuard<ReadyState>) -> usize {
+    fn calculate_sched_period(&self, state: &MutexGuard<ReadyState>) -> usize {
         // Formula:
         // if nr_running <= sched_nr_latency => sched_latency
         // else sched_latency * nr_running / sched_nr_latency
@@ -232,8 +232,6 @@ impl Scheduler {
         } else {
             sched_period = (sched_latency * nr_running) / sched_nr_latency;
         }
-        
-        state.sched_period = sched_period;
 
         sched_period
     }
@@ -255,7 +253,8 @@ impl Scheduler {
     // Lazar Konstantinou:
     fn calculated_sched_vslice(&self, state: &MutexGuard<ReadyState>, entity_weight: usize, sum_entities_weight: usize) -> usize {
         // Formula: (current_period*thread_weight)//entity_weight+sum(all_thread_weights))
-        (state.sched_period * entity_weight) / (entity_weight+sum_entities_weight)
+        let sched_period = self.calculate_sched_period(state);
+        (sched_period * entity_weight) / (entity_weight+sum_entities_weight)
     }
 
     /// Description: Put calling thread to sleep for `ms` milliseconds
