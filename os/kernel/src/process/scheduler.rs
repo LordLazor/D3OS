@@ -14,7 +14,7 @@ use log::info;
 use rbtree::RBTree;
 
 use core::{panic, ptr};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize};
 use core::sync::atomic::Ordering::Relaxed;
 use smallmap::Map;
 use spin::{Mutex, MutexGuard};
@@ -22,13 +22,18 @@ use spin::{Mutex, MutexGuard};
 // thread IDs
 static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
+static sched_nr_latency: usize = 5; // initial value in Linux will not be touched
+static sched_latency: usize = 20_000_000; // initial value in Linux will not be touched
+static sched_min_granularity: usize = 4_000_000; // initial value in Linux will not be touched
+
 pub fn next_thread_id() -> usize {
     THREAD_ID_COUNTER.fetch_add(1, Relaxed)
 }
 
 
 struct ReadyState {
-    sched_period: usize, // in nanoseconds
+    sched_slice: usize,
+    sched_period: usize,
     initialized: bool,
     last_switch_time: usize,
     rb_tree: RBTree<usize, Rc<SchedulingEntity>>,
@@ -111,7 +116,9 @@ impl Scheduler {
     pub fn new() -> Self {
         Self {
             ready_state: Mutex::new(ReadyState {
-                sched_period: 6_000_000, // 6 ms
+                sched_slice: 0, 
+                sched_period: 0, 
+
                 initialized: false,
                 last_switch_time: 0,
                 rb_tree: RBTree::new(),
@@ -173,6 +180,8 @@ impl Scheduler {
         let mut state = self.get_ready_state();
         state.current = state.rb_tree.pop_first().map(|(_, entity)| entity);
 
+        self.update_sched_slice(&mut state);
+
         unsafe { 
             let entity = state.current.as_ref().expect("Failed to pop first thread from cfs tree!");
             Thread::start_first(entity.thread().as_ref());
@@ -210,10 +219,43 @@ impl Scheduler {
         join_map.insert(id, Vec::new());
     }
     
-    // Lazar
+    // Lazar Konstantinou:
+    fn calculate_sched_period(&self, state: &mut MutexGuard<ReadyState>) -> usize {
+        // Formula:
+        // if nr_running <= sched_nr_latency => sched_latency
+        // else sched_latency * nr_running / sched_nr_latency
+
+        let sched_period: usize;
+        let nr_running = state.rb_tree.len();
+        if nr_running <= sched_nr_latency {
+            sched_period = sched_latency;
+        } else {
+            sched_period = (sched_latency * nr_running) / sched_nr_latency;
+        }
+        
+        state.sched_period = sched_period;
+
+        sched_period
+    }
+
+    /// Lazar Konstantinou:
+    fn update_sched_slice(&self, state: &mut MutexGuard<ReadyState>) {
+        let sched_period = self.calculate_sched_period(state);
+
+        let current_weight = state.current.as_ref().unwrap().weight;
+        let sum_rbtree_weights: usize = state.rb_tree.iter()
+            .map(|(_, entity)| entity.weight)
+            .sum();
+        
+        // Formula for sched_slice:
+        // sched_period * current_weight / (current_weight+sum_rbtree_weights)
+        state.sched_slice = (sched_period * current_weight) / (current_weight + sum_rbtree_weights);
+    }
+
+    // Lazar Konstantinou:
     fn calculated_sched_vslice(&self, state: &MutexGuard<ReadyState>, entity_weight: usize, sum_entities_weight: usize) -> usize {
-        // Formula: (current_period*thread_weight)/sum(all_thread_weights)
-        (state.sched_period * entity_weight) / sum_entities_weight
+        // Formula: (current_period*thread_weight)//entity_weight+sum(all_thread_weights))
+        (state.sched_period * entity_weight) / (entity_weight+sum_entities_weight)
     }
 
     /// Description: Put calling thread to sleep for `ms` milliseconds
@@ -321,13 +363,15 @@ impl Scheduler {
                 return false;
             }
 
-            let period_time = (6_000_000 / rb_tree_len).max(750_000);
-            //let period_time = 500_000;
-            state.sched_period = period_time as usize;
+            
 
-            if now - state.last_switch_time < period_time {
+            
+
+            if now - state.last_switch_time < state.sched_slice {
                 return false;
             }
+
+            self.update_sched_slice(&mut state);
 
             self.update_current(&mut state);
 
