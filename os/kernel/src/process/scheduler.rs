@@ -252,9 +252,9 @@ impl Scheduler {
 
     // Lazar Konstantinou:
     fn calculated_sched_vslice(&self, state: &MutexGuard<ReadyState>, entity_weight: usize, sum_entities_weight: usize) -> usize {
-        // Formula: (current_period*thread_weight)//entity_weight+sum(all_thread_weights))
+        // Formula: (current_period*NICE_0_LOAD)//entity_weight+sum(all_thread_weights))
         let sched_period = self.calculate_sched_period(state);
-        (sched_period * entity_weight) / (entity_weight+sum_entities_weight)
+        (sched_period * 1024) / (entity_weight+sum_entities_weight)
     }
 
     /// Description: Put calling thread to sleep for `ms` milliseconds
