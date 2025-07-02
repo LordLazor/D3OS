@@ -211,7 +211,8 @@ impl Scheduler {
             let sum_weights: usize = state.rb_tree.iter()
                 .map(|(_, entity)| entity.weight)
                 .sum();
-            entity_struct.vruntime = self.calculated_sched_vslice(&state, weight, sum_weights);
+            let min_vruntime = state.rb_tree.get_first().map(|(key, _)| *key).unwrap_or(0);
+            entity_struct.vruntime = self.calculated_sched_vslice(&state, weight, sum_weights, min_vruntime);
         }
 
         let entity = Rc::new(entity_struct);
@@ -251,10 +252,10 @@ impl Scheduler {
     }
 
     // Lazar Konstantinou:
-    fn calculated_sched_vslice(&self, state: &MutexGuard<ReadyState>, entity_weight: usize, sum_entities_weight: usize) -> usize {
+    fn calculated_sched_vslice(&self, state: &MutexGuard<ReadyState>, entity_weight: usize, sum_entities_weight: usize, min_vruntime: usize) -> usize {
         // Formula: (current_period*NICE_0_LOAD)//entity_weight+sum(all_thread_weights))
         let sched_period = self.calculate_sched_period(state);
-        (sched_period * 1024) / (entity_weight+sum_entities_weight)
+        min_vruntime + (sched_period * 1024) / (entity_weight+sum_entities_weight)
     }
 
     /// Description: Put calling thread to sleep for `ms` milliseconds
