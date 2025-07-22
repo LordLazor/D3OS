@@ -26,7 +26,7 @@ pub fn init() {
     SOCKETS.call_once(|| RwLock::new(SocketSet::new(Vec::new())));
 
     let devices = pci_bus().search_by_ids(0x10ec, 0x8139);
-    if devices.len() > 0 {
+    if !devices.is_empty() {
         RTL8139.call_once(|| {
             info!("Found Realtek RTL8139 network controller");
             let rtl8139 = Arc::new(Rtl8139::new(devices[0]));
@@ -38,9 +38,10 @@ pub fn init() {
     }
 
     if RTL8139.get().is_some() {
-        scheduler().ready(Thread::new_kernel_thread(|| loop {
-            poll_sockets();
-        }, "RTL8139"), 0);
+        extern "sysv64" fn poll() {
+            loop { poll_sockets(); }
+        }
+        scheduler().ready(Thread::new_kernel_thread(poll, "RTL8139"), 0);
     }
 }
 

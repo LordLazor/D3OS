@@ -28,7 +28,8 @@ impl Thread {
     }
 }
 
-fn kickoff_user_thread(entry: fn()) {
+extern "sysv64" fn kickoff_user_thread(entry: extern "sysv64" fn()) {
+    // entry has no parameters, so we don't really need to ensure the calling convention
     entry();
     exit();
 }
@@ -37,7 +38,7 @@ pub fn create(entry: fn()) -> Option<Thread> {
     let res = syscall(SystemCall::ThreadCreate, &[kickoff_user_thread as usize,
         entry as usize,]);
     match res {
-        Ok(id) => Some(Thread::new(id as usize)),
+        Ok(id) => Some(Thread::new(id)),
         Err(_) => None,
     }    
 }
@@ -45,7 +46,7 @@ pub fn create(entry: fn()) -> Option<Thread> {
 pub fn current() -> Option<Thread> {
     let res = syscall(SystemCall::ThreadId, &[]);
     match res {
-        Ok(id) => Some(Thread::new(id as usize)),
+        Ok(id) => Some(Thread::new(id)),
         Err(_) => None,
     }    
 }
@@ -70,7 +71,7 @@ pub fn start_application(name: &str, args: Vec<&str>) -> Option<Thread> {
     name.len(),
     ptr::from_ref(&args) as usize,]);
     match res {
-        Ok(id) => Some(Thread::new(id as usize)),
+        Ok(id) => Some(Thread::new(id)),
         Err(_) => None,
     }    
 }

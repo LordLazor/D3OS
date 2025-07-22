@@ -164,13 +164,6 @@ impl Timer {
         self.systime_ns.load(Ordering::Relaxed) / 1000000
     }
 
-    /* Lazar Konstantinou
-        Nanoseconds to use them in the cfs scheduler
-    */
-    pub fn systime_ns(&self) -> usize {
-        self.systime_ns.load(Ordering::Relaxed)
-    }
-
     pub fn wait(&self, wait_time_ms: usize) {
         let wait_time_ns = wait_time_ms * 1000000;
         let mut elapsed_time_ns = 0;

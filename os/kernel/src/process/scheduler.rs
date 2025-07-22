@@ -12,6 +12,9 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use log::info;
 use rbtree::RBTree;
+use crate::Arc;
+
+
 
 use core::{panic, ptr};
 use core::sync::atomic::{AtomicUsize};
@@ -46,7 +49,7 @@ pub struct SchedulingEntity {
     nice: usize,
     weight: usize,
     last_exec_time: usize,
-    thread: Rc<Thread>,
+    thread: Arc<Thread>,
 }
 
 /// 
@@ -73,9 +76,9 @@ impl SchedulingEntity {
         Lazar Konstantinou and David Schwabauer:
         Creates a new CfsSchedulingEntity instance for a given thread    
      */
-    pub fn new(thread: Rc<Thread>, nice: i32) -> Self {
+    pub fn new(thread: Arc<Thread>, nice: i32) -> Self {
         // current system time in nanoseconds
-        let current_time = timer().systime_ns();
+        let current_time = timer().systime_ms();
         let nice = nice; // Sinnvoll wäre (um die Funktionalität des CFS zu sehen), wenn man unterschiedliche nice Werte setzt oder sie zufällig bestimmt
         let weight = Scheduler::nice_to_weight(nice) as usize; //Gewicht richtig setzen um richtig damit rechnen zu können
         Self {
@@ -105,8 +108,8 @@ impl SchedulingEntity {
         Lazar Konstantinou:
         Returns the current scheduling entity so there are no issues with borrowing 
     */
-    pub fn thread(&self) -> Rc<Thread> {
-        Rc::clone(&self.thread)
+    pub fn thread(&self) -> Arc<Thread> {
+        Arc::clone(&self.thread)
     }
 }
 
@@ -156,7 +159,7 @@ impl Scheduler {
     /// 
     /// Lazar Konstantinou:
     /// Small changes to get a Thread inside of a SchedulingEntity
-    pub fn current_thread(&self) -> Rc<Thread> {
+    pub fn current_thread(&self) -> Arc<Thread> {
         let state = self.get_ready_state();
         Scheduler::current(&state).thread()
     }
@@ -165,7 +168,7 @@ impl Scheduler {
     /// 
     /// Lazar Konstantinou:
     /// Changes for the cfs scheduler as accessing the SchedulingEntity
-    pub fn thread(&self, thread_id: usize) -> Option<Rc<Thread>> {
+    pub fn thread(&self, thread_id: usize) -> Option<Arc<Thread>> {
         self.get_ready_state().rb_tree
             .iter()
             .find(|(_, entity)| entity.thread().id() == thread_id)
@@ -197,10 +200,11 @@ impl Scheduler {
     /// Changes for the cfs scheduler as using the join map correctly
     /// Important: ready() gets a thread and creates a new SchedulingEntity for it.
     /// Also initialized the virtual runtime here
-    pub fn ready(&self, thread: Rc<Thread>, nice: i32) {
+    pub fn ready(&self, thread: Arc<Thread>, nice: i32) {
         let id = thread.id();
         // We need to create a new SchedulingEntity wrapper for the thread when being inserted into the scheduler
         let mut entity_struct: SchedulingEntity = SchedulingEntity::new(thread, nice);
+
         let (mut state, mut join_map) = self.get_ready_state_and_join_map();
 
         if state.rb_tree.len() == 0 {
@@ -356,7 +360,7 @@ impl Scheduler {
                 return false;
             }
 
-            let now = timer().systime_ns();
+            let now = timer().systime_ms();
             let rb_tree_len = state.rb_tree.len();
             if rb_tree_len == 0 {
                 // No threads in the ready queue, so we dont need to switch
@@ -670,7 +674,7 @@ impl Scheduler {
             return;
         };
 
-        let now = timer().systime_ns();
+        let now = timer().systime_ms();
         state.last_switch_time = now;
         let delta_exec = now.saturating_sub(current_entity.last_exec_time);
         if delta_exec <= 0 {
