@@ -11,6 +11,7 @@ use crate::process::thread::Thread;
 use crate::{allocator, apic, scheduler, timer, tss};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::info;
 use core::ptr;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::Relaxed;
@@ -301,55 +302,21 @@ impl Scheduler {
     /// Parameters: `interrupt` true = called from ISR -> need to send EOI to APIC
     ///                         false = no EOI needed
     /// 
-    fn switch_thread(&self, mut state: &mut ReadyState, interrupt: bool) {
+    fn switch_thread(&self, state: &mut ReadyState, interrupt: bool) {
 
-            if !state.initialized {
-                return;
-            }
-
-            if let Some(mut sleep_list) = self.sleep_list.try_lock() {
-                Scheduler::check_sleep_list(&mut state, &mut sleep_list);
-            }
-
-            // Get clone of the current thread
-            let current = Scheduler::current(&state);
-
-            // Current thread is initializing itself and may not be interrupted
-            if current.thread().stacks_locked() || tss().is_locked() {
-                return;
-            }
-
-            // Try to get the next thread from the ready queue
-            if let Some((current, next)) = self.prepare_context_switch(&mut state) {
-                self.perform_context_switch(state, current, next, interrupt);
-            }
-        
-    }
-
-    /// Checks if a context switch is needed and returns current and next thread
-    /// David Schwabauer:
-    fn prepare_context_switch(&self, state: &mut ReadyState) -> Option<(Arc<SchedulingEntity>, Arc<SchedulingEntity>)> {
         let current = Scheduler::current(&state);
+        
         let next = match state.rb_tree.pop_first() {
             Some((_, entity)) => entity,
-            None => return None,
+            None => return,
         };
-
-        if current.thread().stacks_locked() || tss().is_locked() {
-            return None;
-        }
 
         if current.vruntime() < next.vruntime() {
             // Current thread has a smaller vruntime than the next thread, so we do not switch
             state.rb_tree.insert(next.vruntime(), next);
-            return None;
+            return;
         }
-        Some((current, next))
-    }
 
-    /// Performs the actual context switch between two threads
-    /// David Schwabauer: 
-    fn perform_context_switch(&self, state: &mut ReadyState, current: Arc<SchedulingEntity>, next: Arc<SchedulingEntity>, interrupt: bool) {
         let current_ptr = ptr::from_ref(current.thread().as_ref());
         let next_ptr = ptr::from_ref(next.thread().as_ref());
 
@@ -363,6 +330,7 @@ impl Scheduler {
         unsafe {
             Thread::switch(current_ptr, next_ptr);
         }
+        
     }
 
     /// Description: helper function, calling `switch_thread`
@@ -388,10 +356,22 @@ impl Scheduler {
     // before inserting into the rb_tree check if current threads new vruntime is smaller than the min vruntime of rb tree
     // if true: return false, because the current thread should not be switched out
     // if false: return true and insert old current into tree, because the current thread should be switched out
-    fn check_switch_thread(&self, state: &mut ReadyState) -> bool {
+    fn check_switch_thread(&self, mut state: &mut ReadyState) -> bool {
 
         if !state.initialized {
                 return false;
+            }
+
+            // Get clone of the current thread
+            let current = Scheduler::current(&state);
+
+            // Current thread is initializing itself and may not be interrupted
+            if current.thread().stacks_locked() || tss().is_locked() {
+                return false;
+            }
+
+            if let Some(mut sleep_list) = self.sleep_list.try_lock() {
+                Scheduler::check_sleep_list(&mut state, &mut sleep_list);
             }
 
             let now = timer().systime_ns();
