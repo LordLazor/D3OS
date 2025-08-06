@@ -255,7 +255,6 @@ impl Thread {
             (thread.entry)(); // Directly call the entry function of kernel thread
             drop(thread); // Manually decrease reference count, because exit() will never return
             scheduler.exit();
-            unreachable!();
         } else {
             assert!(!thread.user_kickoff.is_null());
             let thread_ptr = ptr::from_ref(thread.as_ref());

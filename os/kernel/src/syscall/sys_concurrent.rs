@@ -23,14 +23,13 @@ pub extern "sysv64" fn sys_process_id() -> isize {
 pub extern "sysv64" fn sys_process_exit() -> ! {
     scheduler().current_thread().process().exit();
     scheduler().exit();
-    unreachable!();
 }
 
 pub extern "sysv64" fn sys_thread_create(kickoff_addr: u64, entry: extern "sysv64" fn()) -> isize {
     let thread = Thread::new_user_thread(process_manager().read().current_process(), VirtAddr::new(kickoff_addr), entry);
     let id = thread.id();
 
-    scheduler().ready(thread, 0);
+    scheduler().ready(thread);
     id as isize
 }
 
@@ -55,7 +54,6 @@ pub extern "sysv64" fn sys_thread_join(id: usize) -> isize {
 
 pub extern "sysv64" fn sys_thread_exit() -> ! {
     scheduler().exit();
-    unreachable!();
 }
 
 pub unsafe extern "sysv64" fn sys_process_execute_binary(
@@ -65,7 +63,7 @@ pub unsafe extern "sysv64" fn sys_process_execute_binary(
     match initrd().entries().find(|entry| entry.filename().as_str().unwrap() == app_name) {
         Some(app) => {
             let thread = Thread::load_application(app.data(), app_name, unsafe { args.as_ref().unwrap() });
-            scheduler().ready(Arc::clone(&thread), 0);
+            scheduler().ready(Arc::clone(&thread));
             thread.id() as isize
         }
         None => Errno::ENOENT.into(),

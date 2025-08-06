@@ -145,7 +145,7 @@
   },
   {
     "name": "cc",
-    "version": "1.2.30",
+    "version": "1.2.31",
     "authors": "Alex Crichton <alex@alexcrichton.com>",
     "repository": "https://github.com/rust-lang/cc-rs",
     "license": "Apache-2.0 OR MIT",
@@ -909,15 +909,6 @@
     "description": "A library to parse the x86 CPUID instruction, written in rust with no external dependencies. The implementation closely resembles the Intel CPUID manual description. The library does only depend on libcore."
   },
   {
-    "name": "rbtree",
-    "version": "0.2.0",
-    "authors": "tickbh <tickdream125@hotmail.com>",
-    "repository": "https://github.com/tickbh/rbtree-rs",
-    "license": "Apache-2.0 OR MIT",
-    "license_file": null,
-    "description": "the rbtree for Rust"
-  },
-  {
     "name": "regex",
     "version": "1.11.1",
     "authors": "The Rust Project Developers|Andrew Gallant <jamslam@gmail.com>",
@@ -1063,7 +1054,7 @@
   },
   {
     "name": "serde_json",
-    "version": "1.0.141",
+    "version": "1.0.142",
     "authors": "Erick Tryzelaar <erick.tryzelaar@gmail.com>|David Tolnay <dtolnay@gmail.com>",
     "repository": "https://github.com/serde-rs/json",
     "license": "Apache-2.0 OR MIT",
@@ -1783,7 +1774,7 @@
   },
   {
     "name": "zerovec",
-    "version": "0.11.2",
+    "version": "0.11.4",
     "authors": "The ICU4X Project Developers",
     "repository": "https://github.com/unicode-org/icu4x",
     "license": "Unicode-3.0",

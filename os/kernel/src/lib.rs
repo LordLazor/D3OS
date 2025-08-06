@@ -351,7 +351,7 @@ pub fn init_terminal(buffer: *mut u8, pitch: u32, width: u32, height: u32, bpp: 
         let mut cursor_thread = CursorThread::new(terminal());
         cursor_thread.run();
     }
-    scheduler().ready(Thread::new_kernel_thread(cursor, "cursor"), 0);
+    scheduler().ready(Thread::new_kernel_thread(cursor, "cursor"));
 }
 
 pub fn terminal_initialized() -> bool {
