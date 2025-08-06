@@ -357,6 +357,11 @@ impl Scheduler {
             }
 
             let now = timer().systime_ns();
+
+            if now - state.last_switch_time < state.sched_slice {
+                return false;
+            }
+
             let rb_tree_len = state.rb_tree.len();
             if rb_tree_len == 0 {
                 // No threads in the ready queue, so we dont need to switch
@@ -365,14 +370,8 @@ impl Scheduler {
 
             
 
-            
-
-            if now - state.last_switch_time < state.sched_slice {
-                return false;
-            }
-
             self.update_sched_slice(&mut state);
-
+info!("Now time is: {}ns, last switch time is: {}ns, sched_slice is: {}ns", now, state.last_switch_time, state.sched_slice);
             self.update_current(&mut state);
 
             true
