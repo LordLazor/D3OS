@@ -336,18 +336,106 @@ impl Scheduler {
     /// Description: helper function, calling `switch_thread`
     pub fn switch_thread_no_interrupt(&self) {
         if let Some(mut state) = self.ready_state.try_lock() {
-            if self.check_switch_thread(&mut state) {
+            self.switch(&mut state, false);
+            /*if self.check_switch_thread(&mut state) {
                 self.switch_thread(&mut state, false);
-            }
+            }*/
         }
     }
 
     /// Description: helper function, calling `switch_thread`
     pub fn switch_thread_from_interrupt(&self) {
         if let Some(mut state) = self.ready_state.try_lock() {
-            if self.check_switch_thread(&mut state) {
+            self.switch(&mut state, true);
+            /*if self.check_switch_thread(&mut state) {
                 self.switch_thread(&mut state, true);
-            }
+            }*/
+        }
+    }
+
+    fn switch(&self, mut state: &mut ReadyState, interrupt: bool) {
+
+        if !state.initialized {
+            return;
+        }
+
+        // Get clone of the current thread
+        let current = Scheduler::current(&state);
+
+        // Current thread is initializing itself and may not be interrupted
+        if current.thread().stacks_locked() || tss().is_locked() {
+            return;
+        }
+
+        if let Some(mut sleep_list) = self.sleep_list.try_lock() {
+            Scheduler::check_sleep_list(&mut state, &mut sleep_list);
+        }
+
+        let now = timer().systime_ns();
+
+        let sched_slice = state.sched_slice;
+        let last_switch_time = state.last_switch_time;
+
+        if now - last_switch_time < sched_slice {
+            return;
+        }
+
+        let rb_tree_len = state.rb_tree.len();
+        if rb_tree_len == 0 {
+            // No threads in the ready queue, so we dont need to switch
+            return;
+        }
+        drop(current); 
+
+        self.update_sched_slice(state);
+        // info!("Now time is: {}ns, last switch time is: {}ns, sched_slice is: {}ns", now, state.last_switch_time, state.sched_slice);
+        self.update_current(state);
+
+
+        
+        let next = match state.rb_tree.pop_first() {
+            Some((_, entity)) => entity,
+            None => return,
+        };
+
+        //self.print_thread_ids_plus_virtual_runtimes(&mut state);
+
+        let current = Scheduler::current(&state);
+        if current.vruntime() < next.vruntime() {
+            // Current thread has a smaller vruntime than the next thread, so we do not switch
+            state.rb_tree.insert(next.vruntime(), next);
+            return;
+        }
+        
+        
+        let current_ptr = ptr::from_ref(current.thread().as_ref());
+        let next_ptr = ptr::from_ref(next.thread().as_ref());
+        
+        state.current = Some(next);
+        state.rb_tree.insert(current.vruntime(), current);
+        
+        if interrupt {
+            apic().end_of_interrupt();
+        }
+        
+        info!("Switching thread at time {}", now);
+
+        unsafe {
+            Thread::switch(current_ptr, next_ptr);
+        }
+
+        
+    }
+
+    fn print_thread_ids_plus_virtual_runtimes(&self, state: &mut ReadyState){
+        for (vruntime, entity) in state.rb_tree.iter() {
+            info!("Thread ID: {}, vruntime: {}", entity.thread().id(), vruntime);
+        }
+        // print current
+        if let Some(current) = &state.current {
+            info!("Current thread ID: {}, vruntime: {}", current.thread().id(), current.vruntime());
+        } else {
+            info!("No current thread set!");
         }
     }
 
