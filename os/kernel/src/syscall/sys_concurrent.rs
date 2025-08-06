@@ -29,7 +29,7 @@ pub extern "sysv64" fn sys_thread_create(kickoff_addr: u64, entry: extern "sysv6
     let thread = Thread::new_user_thread(process_manager().read().current_process(), VirtAddr::new(kickoff_addr), entry);
     let id = thread.id();
 
-    scheduler().ready(thread);
+    scheduler().ready(thread, 0);
     id as isize
 }
 
@@ -63,7 +63,7 @@ pub unsafe extern "sysv64" fn sys_process_execute_binary(
     match initrd().entries().find(|entry| entry.filename().as_str().unwrap() == app_name) {
         Some(app) => {
             let thread = Thread::load_application(app.data(), app_name, unsafe { args.as_ref().unwrap() });
-            scheduler().ready(Arc::clone(&thread));
+            scheduler().ready(Arc::clone(&thread), 0);
             thread.id() as isize
         }
         None => Errno::ENOENT.into(),

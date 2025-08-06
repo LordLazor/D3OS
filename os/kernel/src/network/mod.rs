@@ -41,7 +41,7 @@ pub fn init() {
         extern "sysv64" fn poll() {
             loop { poll_sockets(); }
         }
-        scheduler().ready(Thread::new_kernel_thread(poll, "RTL8139"));
+        scheduler().ready(Thread::new_kernel_thread(poll, "RTL8139"), 0);
     }
 }
 

@@ -329,7 +329,7 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
             process_manager().write().drop_exited_process();
         }
     }
-    scheduler().ready(Thread::new_kernel_thread(cleanup, "cleanup"));
+    scheduler().ready(Thread::new_kernel_thread(cleanup, "cleanup"), 0);
 
     // Create and register the 'shell' thread (from app image in ramdisk) in the scheduler
     scheduler().ready(Thread::load_application(
@@ -340,7 +340,7 @@ pub extern "C" fn start(multiboot2_magic: u32, multiboot2_addr: *const BootInfor
             .data(),
         "shell",
         &Vec::new(),
-    ));
+    ), 0);
 
     // Disable terminal logging (remove terminal output stream)
     logger().remove(terminal().as_ref());

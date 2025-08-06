@@ -15,6 +15,7 @@ graphic = { path = "../library/graphic" }
 stream = { path = "../library/stream" }
 syscall = { path = "../library/syscall" }
 naming = { path = "../library/naming" }
+rbtree = { path = "../library/rbtree" }
 
 # External depencies
 spin = "0.9.8"
