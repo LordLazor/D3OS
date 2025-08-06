@@ -14,6 +14,17 @@
   <img src="https://img.shields.io/badge/license-GPLv3-orange.svg">
 </p>
 
+---
+
+# Important:
+Please only start D3OS with the following command:
+```bash
+cargo make --no-workspace --profile production
+```
+If you don't use the production profile there could be issues due to the slowness of the non production profile
+
+---
+
 ## Requirements
 
 For building D3OS, a _rust nightly_ toolchain is needed. To install _rust_ use [rustup](https://rustup.rs/):
