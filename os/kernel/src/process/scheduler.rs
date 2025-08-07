@@ -317,6 +317,8 @@ impl Scheduler {
     /// Lazar Konstantinou:
     /// Changes for the cfs scheduler as using the rb tree correct
     /// and checking the vruntime of current and next thread to allow a switching vruntime is lower than current
+    ///
+    /*
     fn switch_thread(&self, state: &mut ReadyState, interrupt: bool) {
 
         let next = match state.rb_tree.pop_first() {
@@ -346,12 +348,53 @@ impl Scheduler {
         }
         
     }
+    */
+    /// David Schwabauer:
+    ///Checks, if there is a Thread with smaller vruntime then the current one
+
+    fn check_smaller_vruntime(&self, state: &mut ReadyState) -> bool {
+        let Some((_, next)) = state.rb_tree.pop_first() else {
+            return false;
+        };
+
+        let current = Scheduler::current_scheduling_entity(state);
+        let should_switch = current.vruntime() >= next.vruntime();
+
+        // Current thread has a smaller vruntime than the next thread, so we do not switch
+        state.rb_tree.insert(next.vruntime(), next);
+        should_switch
+    }
+
+
+    /// David Schwabauer:
+    /// Switch from current to next thread (from ready queue)
+    fn switch_thread(&self, state: &mut ReadyState, interrupt: bool) {
+        let Some((_, next)) = state.rb_tree.pop_first() else {
+            return;
+        };
+
+        let current = Scheduler::current_scheduling_entity(state);
+        let current_ptr = ptr::from_ref(current.thread().as_ref());
+        let next_ptr = ptr::from_ref(next.thread().as_ref());
+
+        state.current = Some(next);
+        state.rb_tree.insert(current.vruntime(), current);
+
+        if interrupt {
+            apic().end_of_interrupt();
+        }
+
+        unsafe {
+            Thread::switch(current_ptr, next_ptr);
+        }
+    }
+
 
     /// Description: helper function, calling `switch_thread`
     /// this also checks if we even should switch threads right now with check_switch_thread and switch then with switch_thread
     pub fn switch_thread_no_interrupt(&self) {
         if let Some(mut state) = self.ready_state.try_lock() {
-            if self.check_switch_thread(&mut state) {
+            if self.check_switch_thread(&mut state) && self.check_smaller_vruntime(&mut state){
                 self.switch_thread(&mut state, false);
             }
         }
@@ -361,7 +404,7 @@ impl Scheduler {
     /// this also checks if we even should switch threads right now with check_switch_thread and switch then with switch_thread
     pub fn switch_thread_from_interrupt(&self) {
         if let Some(mut state) = self.ready_state.try_lock() {
-            if self.check_switch_thread(&mut state) {
+            if self.check_switch_thread(&mut state) && self.check_smaller_vruntime(&mut state){
                 self.switch_thread(&mut state, true);
             }
         }
