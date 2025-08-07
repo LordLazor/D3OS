@@ -36,7 +36,7 @@ pub fn next_thread_id() -> usize {
 }
 
 /// Everything related to the ready state in the scheduler
-/// Lazar Konstantinou:
+/// Lazar Konstantinou and David Schwabauer:
 /// For CFS this also contains the sched_slice, sched_period, redblacktree and last switch time to ensure correctness of corresponding slice
 struct ReadyState {
     sched_slice: usize,
@@ -47,7 +47,7 @@ struct ReadyState {
     current: Option<Arc<SchedulingEntity>>,
 }
 
-// Lazar Konstantinou:
+/// Lazar Konstantinou and David Schwabauer:
 // Contains all necessary information for a thread and the thread itself
 // Manages virtual runtime, nice value, weight and last execution time of given thread
 pub struct SchedulingEntity {
@@ -75,25 +75,21 @@ impl SchedulingEntity {
         }
     }
 
-    // Lazar Konstantinou:
     // Returns the current virtual runtime of the scheduling entity
     pub fn vruntime(&self) -> usize {
         self.vruntime
     }
 
-    // Lazar Konstantinou:
     // sets the vruntime of a schedling entity
     pub fn set_vruntime(&mut self, vruntime: usize) {
         self.vruntime = vruntime;
     }
 
-    // Lazar Konstantinou:
     // Returns the current scheduling entity so there are no issues with borrowing 
     pub fn thread(&self) -> Arc<Thread> {
         Arc::clone(&self.thread)
     }
 }
-
 
 impl ReadyState {
     pub fn new() -> Self {
@@ -169,7 +165,7 @@ impl Scheduler {
 
     /// Description: Return reference to thread for the given `thread_id`
     /// 
-    /// Lazar Konstantinou:
+    /// David Schwabauer:
     /// Changes for the cfs scheduler as accessing the SchedulingEntity
     pub fn thread(&self, thread_id: usize) -> Option<Arc<Thread>> {
         self.get_ready_state().rb_tree
@@ -180,7 +176,7 @@ impl Scheduler {
 
     /// Description: Start the scheduler, called only once from `boot.rs`
     /// 
-    /// Lazar Konstantinou:
+    /// Lazar Konstantinou and David Schwabauer:
     /// Changes for the cfs scheduler as using the cfs tree correctly 
     pub fn start(&self) {
         // TODO: make sure this is actually called just once: This TODO was already inside this commit prob. by Fabian => We ignored this as we had no errors with this case
@@ -248,7 +244,7 @@ impl Scheduler {
         join_map.insert(id, Vec::new());
     }
 
-    // Lazar Konstantinou:
+    // David Schwabauer:
     // Formula:
     // if nr_running <= sched_nr_latency => sched_latency
     // else sched_latency * nr_running / sched_nr_latency
@@ -308,50 +304,8 @@ impl Scheduler {
         }
     }
 
-    /// 
-    /// Description: Switch from current to next thread (from ready queue)
-    /// 
-    /// Parameters: `interrupt` true = called from ISR -> need to send EOI to APIC
-    ///                         false = no EOI needed
-    /// 
-    /// Lazar Konstantinou:
-    /// Changes for the cfs scheduler as using the rb tree correct
-    /// and checking the vruntime of current and next thread to allow a switching vruntime is lower than current
-    ///
-    /*
-    fn switch_thread(&self, state: &mut ReadyState, interrupt: bool) {
-
-        let next = match state.rb_tree.pop_first() {
-            Some((_, entity)) => entity,
-            None => return,
-        };
-
-        let current = Scheduler::current_scheduling_entity(&state);
-        if current.vruntime() < next.vruntime() {
-            // Current thread has a smaller vruntime than the next thread, so we do not switch
-            state.rb_tree.insert(next.vruntime(), next);
-            return;
-        }
-        
-        let current_ptr = ptr::from_ref(current.thread().as_ref());
-        let next_ptr = ptr::from_ref(next.thread().as_ref());
-        
-        state.current = Some(next);
-        state.rb_tree.insert(current.vruntime(), current);
-        
-        if interrupt {
-            apic().end_of_interrupt();
-        }
-
-        unsafe {
-            Thread::switch(current_ptr, next_ptr);
-        }
-        
-    }
-    */
     /// David Schwabauer:
     ///Checks, if there is a Thread with smaller vruntime then the current one
-
     fn check_smaller_vruntime(&self, state: &mut ReadyState) -> bool {
         let Some((_, next)) = state.rb_tree.pop_first() else {
             return false;
@@ -368,6 +322,12 @@ impl Scheduler {
 
     /// David Schwabauer:
     /// Switch from current to next thread (from ready queue)
+    /// 
+    /// Description: Switch from current to next thread (from ready queue)
+    /// 
+    /// Parameters: `interrupt` true = called from ISR -> need to send EOI to APIC
+    ///                         false = no EOI needed
+    ///
     fn switch_thread(&self, state: &mut ReadyState, interrupt: bool) {
         let Some((_, next)) = state.rb_tree.pop_first() else {
             return;
@@ -392,6 +352,7 @@ impl Scheduler {
 
     /// Description: helper function, calling `switch_thread`
     /// this also checks if we even should switch threads right now with check_switch_thread and switch then with switch_thread
+    /// David Schwabauer:
     pub fn switch_thread_no_interrupt(&self) {
         if let Some(mut state) = self.ready_state.try_lock() {
             if self.check_switch_thread(&mut state) && self.check_smaller_vruntime(&mut state){
@@ -402,6 +363,7 @@ impl Scheduler {
 
     /// Description: helper function, calling `switch_thread`
     /// this also checks if we even should switch threads right now with check_switch_thread and switch then with switch_thread
+    /// David Schwabauer:
     pub fn switch_thread_from_interrupt(&self) {
         if let Some(mut state) = self.ready_state.try_lock() {
             if self.check_switch_thread(&mut state) && self.check_smaller_vruntime(&mut state){
@@ -471,7 +433,7 @@ impl Scheduler {
 
     }
 
-    // Lazar:
+    // Lazar Konstantinou und David Schwabauer:
     // Updated die virtual Runtime des aktuellen Threads indem:
     // (deltaExecTime × NICE_0_WEIGHT)/weight_schedule_entity
     fn update_current(&self, state: &mut ReadyState) {
@@ -513,7 +475,7 @@ impl Scheduler {
     /// 
     /// Parameters: `thread_id` thread to wait for
     /// 
-    /// Lazar Konstantinou:
+    /// David Schwabauer:
     /// Changes for the cfs scheduler
     pub fn join(&self, thread_id: usize) {
         let mut state = self.get_ready_state();
@@ -535,7 +497,7 @@ impl Scheduler {
 
     /// Description: Exit calling thread.
     /// 
-    /// Lazar Konstantinou:
+    /// David Schwabauer:
     /// Changes for the cfs scheduler as using the rb tree correct
     pub fn exit(&self) -> ! {
         let mut ready_state;
@@ -611,7 +573,7 @@ impl Scheduler {
     /// Parameters: `state` ReadyState of scheduler 
     /// MS -> why this param?
     /// 
-    /// Lazar Konstantinou:
+    /// David Schwabauer:
     /// Changes for the cfs scheduler as using the rb tree correct and correct refs to the given objects inside
     fn block(&self, state: &mut ReadyState) {
         let mut first_node = state.rb_tree.pop_first();
@@ -725,7 +687,6 @@ impl Scheduler {
         }
     }
 
-    // Lazar Konstantinou:
     // Array which contains the weights for the different nice values
     pub const PRIO_TO_WEIGHT: [u32; 40] = [
         88761, 71755, 56483, 46273, 36291,
@@ -738,7 +699,6 @@ impl Scheduler {
         36,    29,    23,    18,    15,
     ];
 
-    // Lazar Konstantinou:
     // Converts a nice value to the corresponding weight based on the PRIO_TO_WEIGHT array
     pub fn nice_to_weight(nice: i32) -> u32 {
         let idx = (nice + 20).clamp(0, 39) as usize; //Wandelt nice Wert in das passendes Gewicht um, indem er den korrekten Index aus dem Array aufruft, -20 ist Index 0, 19 ist Index 39...
