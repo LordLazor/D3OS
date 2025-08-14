@@ -518,7 +518,7 @@ impl Scheduler {
             join_map.remove(&current.thread().id());
         }
 
-        drop(current); // Decrease Rc manually, because block() does not return
+        drop(current); // Decrease Arc manually, because block() does not return
         self.block(&mut ready_state);
         unreachable!()
     }
@@ -599,7 +599,7 @@ impl Scheduler {
         let next_ptr = ptr::from_ref(next.1.thread().as_ref());
 
         state.current = Some(next.1);
-        drop(current); // Decrease Rc manually, because Thread::switch does not return
+        drop(current); // Decrease Arc manually, because Thread::switch does not return
 
         unsafe {
             Thread::switch(current_ptr, next_ptr);
@@ -613,9 +613,10 @@ impl Scheduler {
         Arc::clone(state.current.as_ref().expect("Trying to access current thread before initialization!"))
     }
 
-    // Lazar Konstantinou and David Schwabauer:
-    /// Checks the sleep list for threads that are ready to be woken up and inserts them into the CFS tree. 
-    /// The vruntime should be set to the minimum of all vruntimes if it was the smallest
+    // Lazar Konstantinou:
+    // Checking the sleep list for alle threads that are currently ready to be woken up
+    // Try to insert the thread into the tree with a updated vruntime which check the 
+    // maximum of old vruntime and and min vruntime - sched_latency
     fn check_sleep_list(state: &mut ReadyState, sleep_list: &mut Vec<(Arc<SchedulingEntity>, usize)>) {
         let time = timer().systime_ms();
 
@@ -629,28 +630,28 @@ impl Scheduler {
             }
         });
 
-        // Prüfen für jeden aufwachenden Thread, ob seine vruntime kleiner ist, als die aktuell kleinste im Baum. 
-        // Falls ja, setzte sie auf die kleinste aus dem Baum und füge ihn dort ein
-        // Also there need to be a small epsilon which is beeing subtracted (we use 1 here as epsilon)
+        // Check for each waking thread if its vruntime is smaller than the current minimum in the tree
+        // If yes, set it to the minimum from the tree - SCHED_LATENCY
+        // If his vruntime is greater than the minimum, it should be reinserted with its original vruntime
         for entity in to_reinsert {
             let min_vruntime = state.rb_tree.get_first().map(|(key, _)| *key).unwrap_or(0);
+            
+            let maximum_vruntime = entity.vruntime().max(min_vruntime - SCHED_LATENCY); 
 
-            // Formula here is vruntime = max(vruntime, min_vruntime - epsilon)
-            if entity.vruntime() < min_vruntime {
-                if let Some(mut_entity) = Arc::get_mut(&mut Arc::clone(&entity)) {
+            // Make a clone of the Arc to be able to transform it an mutable arc
+            let mut entity_clone = Arc::clone(&entity);
+            drop(entity); // Drop entity because otherwise we would have to Refs to an Arc (not possible) => no mutable ever!
+            let Some(entity_arc) = Arc::get_mut(&mut entity_clone) else {
+                //info!("Back to sleeplist");
+                sleep_list.push((entity_clone, 1)); // Put 1 in so it will try to wake thread up almost instantly in next iteration
+                continue;
+            };
 
-                    if min_vruntime > 0 {
-                        // Set the vruntime to the minimum vruntime minus 1, so that it is smaller than the minimum
-                        // This is to ensure that the entity is scheduled before any other entity with the same vr as it slept unlike others in the tree
-                        mut_entity.set_vruntime(min_vruntime - 1);
-                    } else {
-                        // Edge case so we can't get into negative vruntimes as it destroys the logic
-                        mut_entity.set_vruntime(min_vruntime);
-                    }
-                } 
-            }
+            entity_arc.set_vruntime(maximum_vruntime);
 
-            state.rb_tree.insert(entity.vruntime(), entity);
+            //info!("Waked up in rbtree with vruntime: {} and maximum: {}", entity_clone.vruntime(), maximum_vruntime);
+
+            state.rb_tree.insert(entity_clone.vruntime(), entity_clone);
         }
 
     }
