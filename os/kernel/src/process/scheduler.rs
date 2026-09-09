@@ -39,7 +39,7 @@ use core::cell::Cell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering::{Relaxed};
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use log::{debug, info};
 use smallmap::Map;
 use spin::{Mutex, MutexGuard, Once};
@@ -95,7 +95,6 @@ pub fn cpu_count() -> u32 {
 
 /// Everything related to the threads in ready state in the scheduler
 pub struct ReadyState {
-    initialized: bool,
     last_fpu_thread: Option<Arc<Thread>>,
     ready_queue: VecDeque<Arc<Thread>>,
     idle_thread: Arc<Thread>
@@ -104,12 +103,10 @@ pub struct ReadyState {
 impl ReadyState {
     pub fn new() -> Self {
 
-        let initialized = false;
         let ready_queue = VecDeque::new();
         let idle_thread = Thread::new_kernel_thread(idle_thread, "idle");
 
         Self {
-            initialized,
             last_fpu_thread: None,
             ready_queue,
             idle_thread,
@@ -125,6 +122,9 @@ pub struct Scheduler {
     blocked_list: Mutex<Vec<Arc<Thread>>>,
     join_map: Mutex<Map<usize, Vec<Arc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
     has_started: bool,
+
+    // Fields from ReadyState migrated to Scheduler struct
+    initialized: AtomicBool,
 }
 
 unsafe impl Send for Scheduler {}
@@ -150,6 +150,9 @@ impl Scheduler {
         let join_map = Mutex::new(Map::new());
         let has_started = false;
 
+        // Fields from ReadyState migrated to Scheduler struct
+        let initialized = AtomicBool::new(false); // Goes only from false to true, so no need for a Mutex
+
         Self {
             current_thread: Cell::default(),
             ready_state,
@@ -157,12 +160,13 @@ impl Scheduler {
             blocked_list,
             join_map,
             has_started,
+            initialized,
         }
     }
 
     /// Called after the scheduler has been fully initialized
     pub fn set_init(&self) {
-        self.get_ready_state().initialized = true;
+        self.initialized.store(true, Release);
     }
 
     /// returns the number of threads that are currently actively running on this CPU
@@ -280,7 +284,7 @@ impl Scheduler {
     pub fn sleep(&self, ms: usize) {
         let state = self.get_ready_state();
 
-        if !state.initialized {
+        if !self.initialized.load(Acquire) {
             // Scheduler is not initialized yet, so this function has been called during the boot process
             // So we do active waiting
             timer().wait(ms);
@@ -306,7 +310,7 @@ impl Scheduler {
     pub fn block(&self) {
         let state = self.get_ready_state();
 
-        if !state.initialized {
+        if !self.initialized.load(Acquire) {
             // Scheduler is not initialized yet, so this function has been called during the boot process
             // We panic
             panic!("Scheduler: Cannot block thread before scheduler is initialized!");
@@ -577,7 +581,7 @@ impl Scheduler {
     {
         let state = self.get_ready_state();
 
-        if !state.initialized {
+        if !self.initialized.load(Acquire) {
             return;
         }
 
@@ -664,7 +668,7 @@ impl Scheduler {
     /// If `interrupt` is true, the function is called from an ISR and will send EOI to APIC otherwise not.
     fn switch_thread(&self, interrupt: bool) {
         if let Some(mut state) = self.ready_state.try_lock() {
-            if !state.initialized {
+            if !self.initialized.load(Acquire) {
                 if interrupt { apic().end_of_interrupt(); }
                 return;
             }
@@ -996,7 +1000,7 @@ impl Scheduler {
     pub fn yield_now(&self) {
         let mut state = self.get_ready_state();
 
-        if !state.initialized {
+        if !self.initialized.load(Acquire) {
             return;
         }
 
