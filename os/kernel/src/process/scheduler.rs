@@ -97,19 +97,17 @@ pub fn cpu_count() -> u32 {
 pub struct ReadyState {
     last_fpu_thread: Option<Arc<Thread>>,
     ready_queue: VecDeque<Arc<Thread>>,
-    idle_thread: Arc<Thread>
+    
 }
 
 impl ReadyState {
     pub fn new() -> Self {
 
         let ready_queue = VecDeque::new();
-        let idle_thread = Thread::new_kernel_thread(idle_thread, "idle");
-
+        
         Self {
             last_fpu_thread: None,
             ready_queue,
-            idle_thread,
         }
     }
 }
@@ -125,6 +123,7 @@ pub struct Scheduler {
 
     // Fields from ReadyState migrated to Scheduler struct
     initialized: AtomicBool,
+    idle_thread: Arc<Thread>
 }
 
 unsafe impl Send for Scheduler {}
@@ -150,8 +149,10 @@ impl Scheduler {
         let join_map = Mutex::new(Map::new());
         let has_started = false;
 
+
         // Fields from ReadyState migrated to Scheduler struct
         let initialized = AtomicBool::new(false); // Goes only from false to true, so no need for a Mutex
+        let idle_thread = Thread::new_kernel_thread(idle_thread, "idle"); // No need for Mutex as this is only called once during initialization and only cloned during runtime (no state changes) 
 
         Self {
             current_thread: Cell::default(),
@@ -161,6 +162,7 @@ impl Scheduler {
             join_map,
             has_started,
             initialized,
+            idle_thread,
         }
     }
 
@@ -246,7 +248,7 @@ impl Scheduler {
         self.has_started = true;
         let mut state = self.get_ready_state();
         let next_thread = state.ready_queue.pop_back()
-            .unwrap_or_else(|| state.idle_thread.clone());
+            .unwrap_or_else(|| self.idle_thread.clone());
         let old = self.current_thread.replace(Some(next_thread.clone()));
         assert!(old.is_none());
 
@@ -538,7 +540,7 @@ impl Scheduler {
             drain_inbox_into_ready(10, &mut state);
             next_thread = state.ready_queue.pop_back();
             if next_thread.is_none() {  //still no new thread => switch to idle
-                next_thread = Some(Arc::clone(&state.idle_thread));
+                next_thread = Some(Arc::clone(&self.idle_thread));
             }
         }
 
@@ -686,7 +688,7 @@ impl Scheduler {
 
             // Get clone of the current thread
             let current = self.current_thread();
-            let current_was_idle = current.id() == state.idle_thread.id();
+            let current_was_idle = current.id() == self.idle_thread.id();
 
             // Current thread is initializing itself and may not be interrupted
             if current.stacks_locked() || tss_static().is_locked() {
@@ -708,7 +710,7 @@ impl Scheduler {
                         return;
                     }
                     //no new thread & last!=idle => switch to idle
-                    Arc::clone(&state.idle_thread)
+                    Arc::clone(&self.idle_thread)
                 },
             };
 
