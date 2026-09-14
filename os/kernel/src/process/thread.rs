@@ -34,6 +34,7 @@
    ║ Author: Fabian Ruhland & Michael Schoettner, 04.01.2026, HHU            ║
    ╚═════════════════════════════════════════════════════════════════════════╝
 */
+use crate::collections::hazard_pointers::{HPRecType, allocate_hprec, retire_hprec};
 use crate::consts::MAIN_USER_STACK_START;
 use crate::consts::MAX_USER_STACK_SIZE;
 use crate::consts::USER_SPACE_ENV_START;
@@ -52,7 +53,7 @@ use alloc::vec::Vec;
 use log::debug;
 use core::arch::naked_asm;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use goblin::elf::Elf;
 use goblin::elf64;
 use log::error;
@@ -106,6 +107,7 @@ pub struct Thread {
     wake_pending: AtomicBool, // false => allowed to block; true => do NOT block (wake pending)
     xsave_state: XSaveState,
     cls_references: AtomicUsize,
+    hp_record: AtomicPtr<HPRecType<()>>,
 }
 
 impl core::fmt::Debug for Thread {
@@ -159,6 +161,7 @@ impl Thread {
             wake_pending: AtomicBool::new(false),
             xsave_state: XSaveState::new(),
             cls_references: AtomicUsize::default(),
+            hp_record: AtomicPtr::new(ptr::null_mut()),
         };
 
         thread.prepare_kernel_stack();
@@ -228,6 +231,7 @@ impl Thread {
             wake_pending: AtomicBool::new(false),
             xsave_state: XSaveState::new(),
             cls_references: AtomicUsize::default(),
+            hp_record: AtomicPtr::new(ptr::null_mut()),
         };
 
         thread.prepare_kernel_stack();
@@ -313,6 +317,18 @@ impl Thread {
     /// Return my thread id
     pub fn id(&self) -> usize {
         self.id
+    }
+
+    pub fn hp_record<NodeType>(&self) -> *mut HPRecType<NodeType> {
+        let existing = self.hp_record.load(Ordering::SeqCst);
+        let hprec = if existing.is_null() {
+            let allocated = allocate_hprec();
+            self.hp_record.store(allocated, Ordering::SeqCst);
+            allocated
+        } else {
+            existing
+        };
+        hprec as *mut HPRecType<NodeType>
     }
 
     pub fn store_fpu_context(&self) {
@@ -606,7 +622,16 @@ impl Thread {
     /// In that case, the thread would access the wrong (old) one after the
     /// migration.
     pub(super) fn can_migrate(&self) -> bool {
-        self.cls_references.load(Ordering::SeqCst) == 0 
+        self.cls_references.load(Ordering::SeqCst) == 0
+    }
+}
+
+impl Drop for Thread {
+    fn drop(&mut self) {
+        let hprec = self.hp_record.load(Ordering::SeqCst);
+        if !hprec.is_null() {
+            retire_hprec(hprec);
+        }
     }
 }
 
