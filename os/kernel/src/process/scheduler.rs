@@ -68,6 +68,25 @@ impl PartialOrd for SleepEntry {
     }
 }
 
+#[derive(Clone)]
+struct BlockedEntry {
+    pid: Uuid,
+    thread_id: usize,
+    thread: Arc<Thread>,
+}
+
+impl PartialEq for BlockedEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.thread_id == other.thread_id
+    }
+}
+
+impl PartialOrd for BlockedEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.thread_id.partial_cmp(&other.thread_id)
+    }
+}
+
 // thread IDs
 pub static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(1);  //BP automatically
@@ -137,7 +156,7 @@ pub struct Scheduler {
     current_thread: Cell<Option<Arc<Thread>>>,
     ready_state: Mutex<ReadyState>,
     sleep_list: LockFreeList<SleepEntry>,
-    blocked_list: Mutex<Vec<Arc<Thread>>>,
+    blocked_list: LockFreeList<BlockedEntry>,
     join_map: Mutex<Map<usize, Vec<Arc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
     has_started: bool,
 
@@ -164,7 +183,7 @@ impl Scheduler {
 
         let ready_state = Mutex::new(rs);
         let sleep_list = LockFreeList::new();
-        let blocked_list = Mutex::new(Vec::new());
+        let blocked_list = LockFreeList::new();
         let join_map = Mutex::new(Map::new());
         let has_started = false;
 
@@ -338,11 +357,10 @@ impl Scheduler {
             // Scheduler is initialized, so we can block the calling thread
             let thread = self.current_thread();
             thread.set_state(ThreadState::Blocked);
-            {
-                // Execute in own block, so that the lock is released automatically (block() does not return)
-                let mut block_list = self.blocked_list.lock();
-                block_list.push(thread);
-            } // drop lock for block_list
+            let pid = thread.process().id();
+            let thread_id = thread.id();
+            let myhprec = thread.hp_record::<Node<BlockedEntry>>();
+            self.blocked_list.insert(BlockedEntry { pid, thread_id, thread }, myhprec);
             //info!("Scheduler::block: switch to next thread");
             dec_rq_len();
             self.block_and_switch(state);
@@ -351,11 +369,10 @@ impl Scheduler {
 
     /// Requeue thread with `tid` from process with `pid` to the ready queue of the scheduler
     pub fn deblock(&self, pid: Uuid, tid: usize) {
-        let mut block_list = self.blocked_list.lock();
+        let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
 
-        if let Some(pos) = block_list.iter().position(|thread| thread.id() == tid && thread.process().id() == pid) {
-            let thread = block_list.remove(pos);
-            self.ready(thread);
+        if let Some(entry) = self.blocked_list.find_and_remove(|e| e.thread_id == tid && e.pid == pid, myhprec) {
+            self.ready(entry.thread);
         } else {
             schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
         }
@@ -465,10 +482,8 @@ impl Scheduler {
             }
             if!changed {
                 {   // check Block List
-                    let mut blocked_list = self.blocked_list.lock();
-                    let before = blocked_list.len();
-                    blocked_list.retain(|t| t.id() != thread_id);
-                    if blocked_list.len() != before {
+                    let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
+                    if self.blocked_list.find_and_remove(|entry| entry.thread_id == thread_id, myhprec).is_some() {
                         changed = true;
                     }
                 }
@@ -604,10 +619,11 @@ impl Scheduler {
 
         thread.set_state(ThreadState::Blocked);
 
-        {
-            let mut block_list = self.blocked_list.lock();
-            block_list.push(Arc::clone(&thread));
-        }
+        let pid = thread.process().id();
+        let thread_id = thread.id();
+        let myhprec = thread.hp_record::<Node<BlockedEntry>>();
+        self.blocked_list.insert(BlockedEntry { pid, thread_id, thread: Arc::clone(&thread) }, myhprec);
+
         dec_rq_len();
         self.block_and_switch(state);
     }
@@ -621,14 +637,10 @@ impl Scheduler {
         let mut state = self.ready_state.lock();
 
         // 1) Check if the given thread is in the blocked list -> need to be woken up
-        let blocked_thread: Option<Arc<Thread>> = {
-            let mut block_list = self.blocked_list.lock();
-            if let Some(pos) = block_list.iter().position(|t| t.id() == tid && t.process().id() == pid) {
-                Some(block_list.remove(pos))
-            } else {
-                None
-            }
-        };
+        let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
+        let blocked_thread: Option<Arc<Thread>> = self.blocked_list
+            .find_and_remove(|e| e.thread_id == tid && e.pid == pid, myhprec)
+            .map(|entry| entry.thread);
 
         // If we found a blocked thread in the block_list, wake it up
         if let Some(thread) = blocked_thread {
@@ -926,11 +938,7 @@ impl Scheduler {
         let _ = writeln!(out, "(sleeping threads not listed: LockFreeList has no iteration support)");
 
         // Block list
-        let block_list = self.blocked_list.lock();
-        for thread in block_list.iter() {
-            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", thread.process().id(), thread.id(), thread.state(), thread.process().name());
-        }
-        drop(block_list);
+        let _ = writeln!(out, "(blocked threads not listed: LockFreeList has no iteration support)");
 
         // Copy to caller buffer (truncate if needed)
         let bytes = out.as_bytes();
@@ -957,15 +965,12 @@ impl Scheduler {
             }
             // If the thread is locally blocked, requeue it.
             MessageCmd::Deblock { pid, tid } => {
-                let mut blocked_list = self.blocked_list.lock();
                 if is_thread_alive(tid) == false { return; }
 
-                if let Some(pos) = blocked_list
-                    .iter().position(|t| t.id() == tid && t.process().id() == pid)
-                {
-                    let thread = blocked_list.remove(pos);
-                    thread.set_state(ThreadState::Running);
-                    state.ready_queue.push_front(thread);
+                let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
+                if let Some(entry) = self.blocked_list.find_and_remove(|e| e.thread_id == tid && e.pid == pid, myhprec) {
+                    entry.thread.set_state(ThreadState::Running);
+                    state.ready_queue.push_front(entry.thread);
                     inc_rq_len();
                 }
             }
