@@ -47,6 +47,26 @@ use thingbuf::mpsc::{Sender};
 use crate::device::apic::get_apic_id;
 use crate::device::cpu::{disable_int_nested, enable_int_nested};
 use crate::process::core_local_storage::{cls, current_core_id, scheduler, tss_static};
+use crate::collections::lock_free_list_with_hp::{LockFreeList, Node};
+
+#[derive(Clone)]
+struct SleepEntry {
+    wakeup_time: usize,
+    thread_id: usize,
+    thread: Arc<Thread>,
+}
+
+impl PartialEq for SleepEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.wakeup_time == other.wakeup_time && self.thread_id == other.thread_id
+    }
+}
+
+impl PartialOrd for SleepEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        (self.wakeup_time, self.thread_id).partial_cmp(&(other.wakeup_time, other.thread_id))
+    }
+}
 
 // thread IDs
 pub static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -116,7 +136,7 @@ impl ReadyState {
 pub struct Scheduler {
     current_thread: Cell<Option<Arc<Thread>>>,
     ready_state: Mutex<ReadyState>,
-    sleep_list: Mutex<Vec<(Arc<Thread>, usize)>>,
+    sleep_list: LockFreeList<SleepEntry>,
     blocked_list: Mutex<Vec<Arc<Thread>>>,
     join_map: Mutex<Map<usize, Vec<Arc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
     has_started: bool,
@@ -140,11 +160,10 @@ impl Scheduler {
     /// Create and initialize the scheduler.
     pub fn new() -> Self {
         info!("Initializing scheduler for CPU {}", current_core_id());
-        let vec = Vec::new();
         let rs = ReadyState::new();
 
         let ready_state = Mutex::new(rs);
-        let sleep_list = Mutex::new(vec);
+        let sleep_list = LockFreeList::new();
         let blocked_list = Mutex::new(Vec::new());
         let join_map = Mutex::new(Map::new());
         let has_started = false;
@@ -295,13 +314,11 @@ impl Scheduler {
             // Scheduler is initialized, so we can block the calling thread
             let thread = self.current_thread();
             thread.set_state(ThreadState::Sleeping);
-            
-            {
-                // Execute in own block, so that the lock is released automatically (block() does not return)
-                let wakeup_time = timer().systime_ms() + ms;
-                let mut sleep_list = self.sleep_list.lock();
-                sleep_list.push((thread, wakeup_time));
-            }
+
+            let wakeup_time = timer().systime_ms() + ms;
+            let thread_id = thread.id();
+            let myhprec = thread.hp_record::<Node<SleepEntry>>();
+            self.sleep_list.insert(SleepEntry { wakeup_time, thread_id, thread }, myhprec);
 
             dec_rq_len();
             self.block_and_switch(state);
@@ -442,13 +459,8 @@ impl Scheduler {
             changed = true;
         }
         if !changed {
-            {   // check sleep_list
-                let mut sleep_list = self.sleep_list.lock();
-                before = sleep_list.len();
-                sleep_list.retain(|(thread, _)| thread.id() != thread_id);
-                after = state.ready_queue.len() + sleep_list.len();
-            }
-            if before != after {
+            let myhprec = self.current_thread().hp_record::<Node<SleepEntry>>();
+            if self.sleep_list.find_and_remove(|entry| entry.thread_id == thread_id, myhprec).is_some() {
                 changed = true;
             }
             if!changed {
@@ -484,7 +496,6 @@ impl Scheduler {
     /// Gives out current thread id, then calls other debug methods
     pub fn debug_scheduler(&self) {
         let state = self.get_ready_state();
-        let sleep_list = self.sleep_list.lock();
 
         let nested = disable_int_nested();
         let id = current_core_id();
@@ -498,10 +509,7 @@ impl Scheduler {
         for thread in &state.ready_queue {
             info!("  - {}", thread.id());
         }
-        info!("Scheduler {}: Sleep list:", id);
-        for thread in sleep_list.iter() {
-            info!("  - {}, {}", thread.0.id(), thread.1);
-        }
+        info!("Scheduler {}: Sleep list: (not iterable - LockFreeList has no iteration/dump support)", id);
         for i in 0..nbr_cpus {
             info!("Cpu {} has {} active threads running", i, read_rq_len_remote(i as usize));
         }
@@ -521,12 +529,8 @@ impl Scheduler {
     /// Debugging function to print all threads in the sleep list.
     pub fn debug_sleep_list(&self) {
         let _state_guard = self.get_ready_state();
-        let sleep_list = self.sleep_list.lock();
         let id = current_core_id();
-        info!("Scheduler {}: Sleep list:", id);
-        for thread in sleep_list.iter() {
-            info!("  - {}, {}", thread.0.id(), thread.1);
-        }
+        info!("Scheduler {}: Sleep list: (not iterable - LockFreeList has no iteration/dump support)", id);
     }
 
     /// Block calling thread and switch to next ready thread.
@@ -534,9 +538,7 @@ impl Scheduler {
         let mut next_thread = state.ready_queue.pop_back();
 
         if next_thread.is_none() {
-            // Execute in own if-block, so that the lock is released automatically (block() does not return)
-            let mut sleep_list = self.sleep_list.lock();
-            Scheduler::check_sleep_list(&mut state, &mut sleep_list);
+            self.check_sleep_list(&mut state);
             drain_inbox_into_ready(10, &mut state);
             next_thread = state.ready_queue.pop_back();
             if next_thread.is_none() {  //still no new thread => switch to idle
@@ -675,10 +677,7 @@ impl Scheduler {
                 return;
             }
 
-            // Check for new threads in the sleep list and inbox
-            if let Some(mut sleep_list) = self.sleep_list.try_lock() {
-                Scheduler::check_sleep_list(&mut state, &mut sleep_list);
-            }
+            self.check_sleep_list(&mut state);
             drain_inbox_into_ready(10, &mut state);
 
             // Check if this core has too many threads running
@@ -862,21 +861,18 @@ impl Scheduler {
         }
     }
 
-    
-
-    /// Check the sleep list for threads that need to be woken up
-    fn check_sleep_list(state: &mut ReadyState, sleep_list: &mut Vec<(Arc<Thread>, usize)>) {
+    fn check_sleep_list(&self, state: &mut ReadyState) {
         let time = timer().systime_ms();
+        let myhprec = self.current_thread().hp_record::<Node<SleepEntry>>();
 
-        sleep_list.retain(|entry| {
-            if time >= entry.1 {
-                state.ready_queue.push_front(Arc::clone(&entry.0));
-                inc_rq_len();
-                false
-            } else {
-                true
-            }
-        });
+        while let Some(entry) = self.sleep_list.pop_front_if(
+            SleepEntry { wakeup_time: 0, thread_id: 0, thread: self.idle_thread.clone() },
+            |entry| entry.wakeup_time <= time,
+            myhprec,
+        ) {
+            state.ready_queue.push_front(entry.thread);
+            inc_rq_len();
+        }
     }
 
     /// Helper function returning `ReadyState` of scheduler in a MutexGuard
@@ -927,13 +923,7 @@ impl Scheduler {
         }
 
         // Sleep List
-        let sleep_list = self.sleep_list.lock();
-        for entry in sleep_list.iter() {
-            // You used thread.0 in dump(), so keep that shape
-            let t = &entry.0;
-            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", t.process().id(), t.id(), t.state(), t.process().name());
-        }
-        drop(sleep_list);
+        let _ = writeln!(out, "(sleeping threads not listed: LockFreeList has no iteration support)");
 
         // Block list
         let block_list = self.blocked_list.lock();
