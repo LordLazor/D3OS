@@ -19,17 +19,32 @@ fn r_threshold() -> usize {
 }
 
 // K: the number of hazard pointers each thread uses
+// Note: K is a constant that can be chosen at compile time
+// For the Lock-Free List implementation, you only need K=2 hazard pointers per thread
+// For the Lock-Free Map implementation, you need K=3 hazard pointers per thread
+// I've therefore have chosen K=3 
+// In the future you may adapt this to not waste memory for the lock-free list implementation
 const K: usize = 3;
 
 // Hazard pointer record
 // structure HPRecType { HP[K]: *NodeType; Next: *HPRecType; }
+#[repr(C)]
 pub(crate) struct HPRecType<NodeType> {
-    hp: [AtomicPtr<NodeType>; K], // HP[K]: array of K hazard pointers
+    pub(crate) hp: [AtomicPtr<NodeType>; K], // HP[K]: array of K hazard pointers - pub(crate) so callers can set hp0/hp1 themselves (e.g. in search()'s Find translation)
     next: AtomicPtr<HPRecType<NodeType>>, // Next: pointer to the next hazard pointer record
     active: AtomicBool, // Active: Boolean - true while some thread owns/uses this record
-    rlist: Vec<*mut NodeType>, // rlist:  retired list of nodes to be freed
+    rlist: Vec<RetiredNode>, // rlist:  retired list of nodes to be freed - see RetiredNode for why this isn't just Vec<*mut NodeType>
     rcount: usize, // rcount: count of retired nodes
    }
+
+pub(crate) struct RetiredNode {
+    ptr: *mut (),
+    drop_fn: unsafe fn(*mut ()),
+}
+
+unsafe fn drop_erased<NodeType>(ptr: *mut ()) {
+   unsafe { drop(Box::from_raw(ptr as *mut NodeType)); }
+}
 
 // Shared variables
 // HeadHPRec: *HPRecType; // initially null
@@ -38,7 +53,7 @@ static HEAD_HPREC: AtomicPtr<HPRecType<()>> = AtomicPtr::new(core::ptr::null_mut
 static H: AtomicUsize = AtomicUsize::new(0);
 
 // AllocateHPRec() {
-fn allocate_hprec() -> *mut HPRecType<()> {
+pub(crate) fn allocate_hprec() -> *mut HPRecType<()> {
    // First try to reuse a retired HP record
    // for (hprec = HeadHPRec; hprec != null; hprec = hprec^.Next) {
    let mut hprec = HEAD_HPREC.load(SeqCst);
@@ -101,11 +116,27 @@ fn allocate_hprec() -> *mut HPRecType<()> {
    return hprec;
 }
 
+// RetireHPRec() {
+pub(crate) fn retire_hprec<NodeType>(myhprec: *mut HPRecType<NodeType>) {
+   // for (i = 0 to K-1) myhprec^.HP[i] = null;
+   for i in 0..K {
+      unsafe { (*myhprec).hp[i].store(core::ptr::null_mut(), SeqCst); }
+   }
+
+   // myhprec^.Active = false;
+   unsafe { (*myhprec).active.store(false, SeqCst); }
+}
+
 // Per-thread private variable (Fig. 4)
 // myhprec: *HPRecType; // initially null
 pub(crate) fn retire_node<NodeType>(node: *mut NodeType, myhprec: *mut HPRecType<NodeType>) {
    // myhprec^.rlist.push(node);
-   unsafe { (*myhprec).rlist.push(node); }
+   unsafe {
+      (*myhprec).rlist.push(RetiredNode {
+         ptr: node as *mut (),
+         drop_fn: drop_erased::<NodeType>,
+      });
+   }
 
    // myhprec^.rcount++;
    unsafe { (*myhprec).rcount += 1; }
@@ -157,18 +188,15 @@ pub fn scan(head: *mut HPRecType<()>, myhprec: *mut HPRecType<()>) {
 
    // Stage 2: Search plist
    // tmplist = rlist.popAll();  (rlist = myhprec^.rlist)
-   let mut tmplist: Vec<*mut ()> = unsafe { core::mem::take(&mut (*myhprec).rlist) };
+   let mut tmplist: Vec<RetiredNode> = unsafe { core::mem::take(&mut (*myhprec).rlist) };
 
    // rcount = 0;  (rcount = myhprec^.rcount)
    unsafe { (*myhprec).rcount = 0; }
 
    // node = tmplist.pop();
-   let mut node = tmplist.pop().unwrap_or(core::ptr::null_mut());
-
-   // while (node != null)
-   while !node.is_null() {
+   while let Some(node) = tmplist.pop() {
       // if (plist.lookup(node)) {
-      if plist.contains(&node) {
+      if plist.contains(&node.ptr) {
          // rlist.push(node);
          unsafe { (*myhprec).rlist.push(node); }
 
@@ -178,18 +206,15 @@ pub fn scan(head: *mut HPRecType<()>, myhprec: *mut HPRecType<()>) {
          // PrepareForReuse(node);
          prepare_for_reuse(node);
       }
-      // node = tmplist.pop();
-      node = tmplist.pop().unwrap_or(core::ptr::null_mut());
    }
    // plist.free();
    // Not needed
 
 }
 
-// PrepareForReuse(node: *NodeType) 
-// Is basically a placeholder, maybe return to this later if needed
-fn prepare_for_reuse(node: *mut ()) {
-   todo!();
+// PrepareForReuse(node: *NodeType)
+fn prepare_for_reuse(node: RetiredNode) {
+   unsafe { (node.drop_fn)(node.ptr); }
 }
 
 
@@ -214,7 +239,7 @@ fn help_scan(myhprec: *mut HPRecType<()>) {
       // while (hprec^.rcount > 0) {
       while unsafe { (*hprec).rcount } > 0 {
          // node = hprec^.rlist.pop();
-         let node = unsafe { (*hprec).rlist.pop().unwrap_or(core::ptr::null_mut()) };
+         let Some(node) = (unsafe { (*hprec).rlist.pop() }) else { break; };
 
          // hprec^.rcount--;
          unsafe { (*hprec).rcount -= 1; }
