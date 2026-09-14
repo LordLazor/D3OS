@@ -7,13 +7,22 @@
    ║ https://timharris.uk/papers/2001-disc.pdf                               ║
    ║                                                                         ║
    ║ This implementation is then being combined with Hazard Pointers         ║
+   ║ (see lock_free_list_with_hp.rs)                                         ║
    ║ to provide safe memory reclamation for the nodes of the list.           ║
    ║ The Hazard Pointers are based on Maged M. Michael's paper               ║
    ║ "Hazard Pointers: Safe Memory Reclamation for Lock-Free Objects"        ║
    ║ https://dl.acm.org/doi/10.1109/TPDS.2004.8                              ║
    ╟─────────────────────────────────────────────────────────────────────────╢
-   ║ Author: Lazar Konstantinou, 09.09.2025, HHU                                 ║
+   ║ Author: Lazar Konstantinou, 09.09.2025, HHU                             ║
    ╚═════════════════════════════════════════════════════════════════════════╝
+*/
+
+/*
+IMPORTANT!:
+THIS IS *NOT* THE VERSION WHICH CAN BE USED WITH HAZARD POINTERS.
+IF YOU NEED TO USE A LIST ALGORITHM THAT IS LOCK-FREE IN THE FUTURE, YOU CAN CONSULT THIS IMPLEMENTATION
+AND EXTEND IT UP TO YOUR NEEDS.
+THE FULL LOCK-FREE LIST IMPLEMENTATION WITH HAZARD POINTERS CAN BE FOUND IN lock_free_list_with_hp.rs
 */
 
 use core::{ptr, sync::atomic::{AtomicPtr, Ordering::SeqCst}};
