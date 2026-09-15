@@ -21,7 +21,7 @@ fn r_threshold() -> usize {
 // K: the number of hazard pointers each thread uses
 // Note: K is a constant that can be chosen at compile time
 // For the Lock-Free List implementation, you only need K=2 hazard pointers per thread
-// For the Lock-Free Map implementation, you need K=3 hazard pointers per thread
+// For the Join Map we need K=3 as we need 2 HP's for the List and 1 HP for the Stack of Joiners.
 // I've therefore have chosen K=3 
 // In the future you may adapt this to not waste memory for the lock-free list implementation
 const K: usize = 3;

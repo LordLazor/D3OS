@@ -5,13 +5,6 @@
    ║ This implementation is based on his paper                               ║
    ║ "A Pragmatic Implementation of Non-Blocking Linked-Lists"               ║
    ║ https://timharris.uk/papers/2001-disc.pdf                               ║
-   ║                                                                         ║
-   ║ This implementation is then being combined with Hazard Pointers         ║
-   ║ (see lock_free_list_with_hp.rs)                                         ║
-   ║ to provide safe memory reclamation for the nodes of the list.           ║
-   ║ The Hazard Pointers are based on Maged M. Michael's paper               ║
-   ║ "Hazard Pointers: Safe Memory Reclamation for Lock-Free Objects"        ║
-   ║ https://dl.acm.org/doi/10.1109/TPDS.2004.8                              ║
    ╟─────────────────────────────────────────────────────────────────────────╢
    ║ Author: Lazar Konstantinou, 09.09.2025, HHU                             ║
    ╚═════════════════════════════════════════════════════════════════════════╝
@@ -42,7 +35,7 @@ impl<KeyType> Node<KeyType> {
     }
 }
 
-pub struct LockFreeList<KeyType> {
+struct BasicLockFreeList<KeyType> {
     head: AtomicPtr<Node<KeyType>>,
     tail: AtomicPtr<Node<KeyType>>,
 }
@@ -76,7 +69,7 @@ fn get_marked_reference<KeyType>(reference: *mut Node<KeyType>) -> *mut Node<Key
     ((reference as usize) | MARK_BIT) as *mut Node<KeyType>
 }
 
-impl<KeyType: Clone + PartialEq + PartialOrd + Default> LockFreeList<KeyType> {
+impl<KeyType: Clone + PartialEq + PartialOrd + Default> BasicLockFreeList<KeyType> {
     pub fn new() -> Self {
         // head = new Node<KeyType> ();
         let head = Box::into_raw(Box::new(Node::new(KeyType::default())));
@@ -250,5 +243,7 @@ impl<KeyType: Clone + PartialEq + PartialOrd + Default> LockFreeList<KeyType> {
         }
 
     }
+
+    // iter_mut()
 
 }

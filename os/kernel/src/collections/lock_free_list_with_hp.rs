@@ -323,6 +323,21 @@ impl<KeyType: Clone + PartialEq + PartialOrd> LockFreeList<KeyType> {
         }
     }
 
+    pub fn find_or_insert_with<F, R>(&self, key: KeyType, myhprec: *mut HPRecType<Node<KeyType>>, f: F) -> R 
+    where F: FnOnce(&KeyType) -> R {
+        loop {
+            self.insert(key.clone(), myhprec);
+            let mut left_node: *mut Node<KeyType> = ptr::null_mut();
+
+            let found = self.search(key.clone(), &mut left_node, myhprec);
+            
+            if found != self.tail.load(SeqCst) && unsafe { (*found).key.as_ref() } == Some(&key) {
+                let entry = unsafe { (*found).key.as_ref() }.expect("found is never a sentinel here");
+                return f(entry);
+            }
+        }
+    }
+
     pub fn pop_front_if<F: Fn(&KeyType) -> bool>(&self, min_query: KeyType, is_due: F, myhprec: *mut HPRecType<Node<KeyType>>) -> Option<KeyType> {
         let mut left_node: *mut Node<KeyType> = ptr::null_mut();
         let candidate = self.search(min_query, &mut left_node, myhprec);
