@@ -29,13 +29,13 @@ pub(crate) struct NodeType<DataType> {
     next: AtomicPtr<NodeType<DataType>>
 }
 
-pub(crate) struct LockFreeStack<DataType> {
+pub(crate) struct LockFreeStack<DataType, const HP_BASE: usize = 0> {
     // Shared Variables
     // Top: *NodeType; // Initially null
     top: AtomicPtr<NodeType<DataType>>,
 }
 
-impl<DataType> LockFreeStack<DataType> {
+impl<DataType, const HP_BASE: usize> LockFreeStack<DataType, HP_BASE> {
     pub fn new() -> Self {
         Self {
             top: AtomicPtr::new(ptr::null_mut()),

@@ -43,7 +43,14 @@ impl<KeyType> Node<KeyType> {
     }
 }
 
-pub struct LockFreeList<KeyType> {
+// HP_BASE is a constant generic parameter
+// This is used to specify the base index of the hazard pointers
+// used to for example created nested lists where 
+// the outer list uses hp[0] and hp[1] (so HP_BASE=0) and
+// the inner list uses hp[2] and hp[3] (so HP_BASE=2)
+// An example is the join_map inside the Scheduler
+// The default is 0, which means if you don't have nested lists, you dont need to specify this
+pub struct LockFreeList<KeyType, const HP_BASE: usize = 0> {
     head: AtomicPtr<Node<KeyType>>,
     tail: AtomicPtr<Node<KeyType>>,
 }
@@ -77,7 +84,7 @@ fn get_marked_reference<KeyType>(reference: *mut Node<KeyType>) -> *mut Node<Key
     ((reference as usize) | MARK_BIT) as *mut Node<KeyType>
 }
 
-impl<KeyType: Clone + PartialEq + PartialOrd> LockFreeList<KeyType> {
+impl<KeyType: Clone + PartialEq + PartialOrd, const HP_BASE: usize> LockFreeList<KeyType, HP_BASE> {
     pub fn new() -> Self {
         // head = new Node<KeyType> ();
         let head = Box::into_raw(Box::new(Node::new_sentinel()));
@@ -192,7 +199,7 @@ impl<KeyType: Clone + PartialEq + PartialOrd> LockFreeList<KeyType> {
             // while (cur != null) {
             while cur != self.tail.load(SeqCst) {
                 // *hp0 <- cur;
-                unsafe { (*myhprec).hp[0].store(cur, SeqCst); }
+                unsafe { (*myhprec).hp[HP_BASE].store(cur, SeqCst); }
 
                 // if (*prev != cur) goto try_again;
                 if unsafe { (**left_node).next.load(SeqCst) } != cur {
@@ -235,9 +242,9 @@ impl<KeyType: Clone + PartialEq + PartialOrd> LockFreeList<KeyType> {
 
                     // tmp <- hp0; hp0 <- hp1; hp1 <- tmp; // all private
                     unsafe {
-                        let tmp = (*myhprec).hp[0].load(SeqCst);
-                        (*myhprec).hp[0].store((*myhprec).hp[1].load(SeqCst), SeqCst);
-                        (*myhprec).hp[1].store(tmp, SeqCst);
+                        let tmp = (*myhprec).hp[HP_BASE].load(SeqCst);
+                        (*myhprec).hp[HP_BASE].store((*myhprec).hp[HP_BASE + 1].load(SeqCst), SeqCst);
+                        (*myhprec).hp[HP_BASE + 1].store(tmp, SeqCst);
                     }
 
                     // cur <- next;
@@ -262,7 +269,7 @@ impl<KeyType: Clone + PartialEq + PartialOrd> LockFreeList<KeyType> {
             // while (cur != null) {
             while cur != self.tail.load(SeqCst) {
                 // *hp0 <- cur;
-                unsafe { (*myhprec).hp[0].store(cur, SeqCst); }
+                unsafe { (*myhprec).hp[HP_BASE].store(cur, SeqCst); }
 
                 // if (*prev != cur) goto try_again;
                 if unsafe { (*prev).next.load(SeqCst) } != cur {
@@ -308,9 +315,9 @@ impl<KeyType: Clone + PartialEq + PartialOrd> LockFreeList<KeyType> {
 
                     // tmp <- hp0; hp0 <- hp1; hp1 <- tmp; // all private
                     unsafe {
-                        let tmp = (*myhprec).hp[0].load(SeqCst);
-                        (*myhprec).hp[0].store((*myhprec).hp[1].load(SeqCst), SeqCst);
-                        (*myhprec).hp[1].store(tmp, SeqCst);
+                        let tmp = (*myhprec).hp[HP_BASE].load(SeqCst);
+                        (*myhprec).hp[HP_BASE].store((*myhprec).hp[HP_BASE + 1].load(SeqCst), SeqCst);
+                        (*myhprec).hp[HP_BASE + 1].store(tmp, SeqCst);
                     }
 
                     // cur <- next;
@@ -323,7 +330,75 @@ impl<KeyType: Clone + PartialEq + PartialOrd> LockFreeList<KeyType> {
         }
     }
 
-    pub fn find_or_insert_with<F, R>(&self, key: KeyType, myhprec: *mut HPRecType<Node<KeyType>>, f: F) -> R 
+    pub fn for_each<F: FnMut(&KeyType)>(&self, mut f: F, myhprec: *mut HPRecType<Node<KeyType>>) {
+        // try_again: do { ... }
+        'try_again: loop {
+            // prev <- head;
+            let mut prev: *mut Node<KeyType> = self.head.load(SeqCst);
+
+            // cur <- *prev;
+            let mut cur: *mut Node<KeyType> = unsafe { (*prev).next.load(SeqCst) };
+
+            // while (cur != null) {
+            while cur != self.tail.load(SeqCst) {
+                // *hp0 <- cur;
+                unsafe { (*myhprec).hp[HP_BASE].store(cur, SeqCst); }
+
+                // if (*prev != cur) goto try_again;
+                if unsafe { (*prev).next.load(SeqCst) } != cur {
+                    continue 'try_again;
+                }
+
+                // next <- cur^.Next;
+                let next = unsafe { (*cur).next.load(SeqCst) };
+
+                // if is_marked_reference(next) {
+                if is_marked_reference(next) {
+                    let unmarked_next = get_unmarked_reference(next);
+
+                    // if !CAS(prev,cur,next-1) goto try_again;
+                    if unsafe { (*prev).next.compare_exchange(cur, unmarked_next, SeqCst, SeqCst).is_err() } {
+                        continue 'try_again;
+                    }
+
+                    // RetireNode(cur);
+                    retire_node(cur, myhprec);
+
+                    // cur <- next-1;
+                    cur = unmarked_next;
+                } else {
+                    // ckey <- cur^.Key;
+                    let ckey = unsafe { (*cur).key.clone() }.expect("cur is never a sentinel here");
+
+                    // if (*prev != cur) goto try_again;
+                    if unsafe { (*prev).next.load(SeqCst) } != cur {
+                        continue 'try_again;
+                    }
+
+                    // f(ckey)
+                    f(&ckey);
+
+                    // prev <- &cur^.Next;
+                    prev = cur;
+
+                    // tmp <- hp0; hp0 <- hp1; hp1 <- tmp; // all private
+                    unsafe {
+                        let tmp = (*myhprec).hp[HP_BASE].load(SeqCst);
+                        (*myhprec).hp[HP_BASE].store((*myhprec).hp[HP_BASE + 1].load(SeqCst), SeqCst);
+                        (*myhprec).hp[HP_BASE + 1].store(tmp, SeqCst);
+                    }
+
+                    // cur <- next;
+                    cur = next;
+                }
+            }
+
+            // Reached tail
+            return;
+        }
+    }
+
+    pub fn find_or_insert_with<F, R>(&self, key: KeyType, myhprec: *mut HPRecType<Node<KeyType>>, f: F) -> R
     where F: FnOnce(&KeyType) -> R {
         loop {
             self.insert(key.clone(), myhprec);
