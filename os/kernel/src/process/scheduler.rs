@@ -29,7 +29,6 @@ use crate::{allocator, apic, per_cpu_ref, timer, tss};
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::{vec};
 use alloc::vec::Vec;
 use syscall::return_vals::Errno;
 use uuid::Uuid;
@@ -87,6 +86,48 @@ impl PartialOrd for BlockedEntry {
     }
 }
 
+#[derive(Clone)]
+struct Joiner {
+    thread_id: usize,
+    thread: Arc<Thread>,
+}
+
+impl PartialEq for Joiner {
+    fn eq(&self, other: &Self) -> bool {
+        self.thread_id == other.thread_id
+    }
+}
+
+impl PartialOrd for Joiner {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.thread_id.partial_cmp(&other.thread_id)
+    }
+}
+
+#[derive(Clone)]
+struct JoinEntry {
+    thread_id: usize,
+    joiners: Arc<LockFreeList<Joiner, 2>>,
+}
+
+impl JoinEntry {
+    fn new(thread_id: usize) -> Self {
+        Self { thread_id, joiners: Arc::new(LockFreeList::new()) }
+    }
+}
+
+impl PartialEq for JoinEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.thread_id == other.thread_id
+    }
+}
+
+impl PartialOrd for JoinEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        self.thread_id.partial_cmp(&other.thread_id)
+    }
+}
+
 // thread IDs
 pub static THREAD_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 static ACTIVE_CPUS: AtomicU32 = AtomicU32::new(1);  //BP automatically
@@ -134,18 +175,15 @@ pub fn cpu_count() -> u32 {
 
 /// Everything related to the threads in ready state in the scheduler
 pub struct ReadyState {
-    last_fpu_thread: Option<Arc<Thread>>,
     ready_queue: VecDeque<Arc<Thread>>,
     
 }
 
 impl ReadyState {
     pub fn new() -> Self {
-
         let ready_queue = VecDeque::new();
         
         Self {
-            last_fpu_thread: None,
             ready_queue,
         }
     }
@@ -157,10 +195,11 @@ pub struct Scheduler {
     ready_state: Mutex<ReadyState>,
     sleep_list: LockFreeList<SleepEntry>,
     blocked_list: LockFreeList<BlockedEntry>,
-    join_map: Mutex<Map<usize, Vec<Arc<Thread>>>>, // manage which threads are waiting for a thread-id to terminate
+    join_map: LockFreeList<JoinEntry>, // manage which threads are waiting for a thread-id to terminate
     has_started: bool,
 
     // Fields from ReadyState migrated to Scheduler struct
+    last_fpu_thread: Cell<Option<Arc<Thread>>>,
     initialized: AtomicBool,
     idle_thread: Arc<Thread>
 }
@@ -184,7 +223,7 @@ impl Scheduler {
         let ready_state = Mutex::new(rs);
         let sleep_list = LockFreeList::new();
         let blocked_list = LockFreeList::new();
-        let join_map = Mutex::new(Map::new());
+        let join_map = LockFreeList::new();
         let has_started = false;
 
 
@@ -200,6 +239,7 @@ impl Scheduler {
             join_map,
             has_started,
             initialized,
+            last_fpu_thread: Cell::default(),
             idle_thread,
         }
     }
@@ -298,26 +338,14 @@ impl Scheduler {
         let id = thread.id();
         mark_thread_alive(id);
 
-        // If we get the lock on 'self.state' but not on 'self.join_map' the system hangs.
-        // The scheduler is not able to switch threads anymore, because of 'self.state' is locked,
-        // and we will never be able to get the lock on 'self.join_map'.
-        // To solve this, we need to release the lock on 'self.state' in case we do not get
-        // the lock on 'self.join_map' and let the scheduler switch threads until we get both locks.
-        let (mut state, mut join_map) = loop {
-            let state = self.get_ready_state();
-            if let Some(join_map) = self.join_map.try_lock() {
-                break (state, join_map);
-            }
-            self.switch_thread_no_interrupt();
-        };
+        if let Some(current) = self.try_current_thread() {
+            let myhprec = current.hp_record::<Node<JoinEntry>>();
+            self.join_map.insert(JoinEntry::new(id), myhprec);
+        }
 
+        let mut state = self.get_ready_state();
         inc_rq_len();
         state.ready_queue.push_front(thread);
-
-        // Don't override value if key present
-        if !join_map.contains_key(&id){
-            join_map.insert(id, Vec::new());
-        }
     }
 
     /// Put calling thread to sleep for `ms` milliseconds
@@ -369,10 +397,13 @@ impl Scheduler {
 
     /// Requeue thread with `tid` from process with `pid` to the ready queue of the scheduler
     pub fn deblock(&self, pid: Uuid, tid: usize) {
-        let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
+        let mut state = self.ready_state.lock();
 
+        let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
         if let Some(entry) = self.blocked_list.find_and_remove(|e| e.thread_id == tid && e.pid == pid, myhprec) {
-            self.ready(entry.thread);
+            entry.thread.set_state(ThreadState::Ready);
+            state.ready_queue.push_front(entry.thread);
+            inc_rq_len();
         } else {
             schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
         }
@@ -398,19 +429,13 @@ impl Scheduler {
         let state = self.get_ready_state();
         let thread = self.current_thread();
         thread.set_state(ThreadState::Blocked);
-        {
-            // Execute in own block, so that the lock is released automatically (block() does not return)
-            let mut join_map = self.join_map.lock();
-            if !is_thread_alive(thread_id) {
-                return Err(Errno::ESRCH);
-            }
-            if let Some(join_list) = join_map.get_mut(&thread_id) {
-                join_list.push(thread);
-            } else {
-                // there is a Map on another Core, but we need one here as well
-                join_map.insert(thread_id, vec![thread]);
-            }
-        }
+
+        let myhprec = thread.hp_record::<Node<JoinEntry>>();
+
+        self.join_map.find_or_insert_with(JoinEntry::new(thread_id), myhprec, |entry| {
+            let joiner_hprec = thread.hp_record::<Node<Joiner>>();
+            entry.joiners.insert(Joiner { thread_id: thread.id(), thread: Arc::clone(&thread) }, joiner_hprec);
+        });
 
         dec_rq_len();
         self.block_and_switch(state);
@@ -418,17 +443,22 @@ impl Scheduler {
     }
 
     fn unjoin(&self, thread_id: usize, ready_state: &mut ReadyState) {
-        let mut join_map = self.join_map.lock();
+        let myhprec = self.current_thread().hp_record::<Node<JoinEntry>>();
 
-        if let Some(join_list) = join_map.get_mut(&thread_id) {
-            for thread in join_list {
-                thread.set_state(ThreadState::Running);
-                ready_state.ready_queue.push_front(Arc::clone(thread));
+        if let Some(entry) = self.join_map.find_and_remove(|e| e.thread_id == thread_id, myhprec) {
+            let joiner_hprec = self.current_thread().hp_record::<Node<Joiner>>();
+
+            while let Some(joiner) = entry.joiners.pop_front_if(
+                Joiner { thread_id: 0, thread: self.idle_thread.clone() },
+                |_| true,
+                joiner_hprec,
+            ) {
+                joiner.thread.set_state(ThreadState::Running);
+                ready_state.ready_queue.push_front(joiner.thread);
                 inc_rq_len();
             }
         }
         schedule_on_all_others(MessageItem::Cmd(MessageCmd::JoinTargetExited {tid: thread_id}));
-        join_map.remove(&thread_id);
     }
 
     /// Exit calling thread.
@@ -469,11 +499,12 @@ impl Scheduler {
         let mut changed = false;
 
         // check ready_queue
-        let mut before = state.ready_queue.len();
+        let before = state.ready_queue.len();
         state.ready_queue.retain(|thread| thread.id() != thread_id);
-        let mut after = state.ready_queue.len();
+        let after = state.ready_queue.len();
         if before != after {
             changed = true;
+            dec_rq_len();
         }
         if !changed {
             let myhprec = self.current_thread().hp_record::<Node<SleepEntry>>();
@@ -489,21 +520,20 @@ impl Scheduler {
                 }
                 if !changed {
                     // check all join_map's
-                    let mut join_map = self.join_map.lock();
-                    for (_target, wait_list) in join_map.iter_mut() {
-                        let before = wait_list.len();
-                        wait_list.retain(|t| t.id() != thread_id);
-                        if wait_list.len() != before {
+                    let myhprec = self.current_thread().hp_record::<Node<JoinEntry>>();
+                    self.join_map.for_each(|entry| {
+                        let joiner_hprec = self.current_thread().hp_record::<Node<Joiner>>();
+                        if entry.joiners.find_and_remove(|j| j.thread_id == thread_id, joiner_hprec).is_some() {
                             changed = true;
                         }
-                    }
+                    }, myhprec);
                 }
+
             }
         }
         if changed {
             mark_thread_dead(thread_id);
             self.unjoin(thread_id, state);
-            dec_rq_len();
         }
         changed
     }
@@ -750,13 +780,11 @@ impl Scheduler {
     }
 
     pub fn switch_fpu_context(&self) {
-        let mut state = self.ready_state.lock();
         let current = self.current_thread();
 
         unsafe { asm!("clts"); }
 
-        if state.last_fpu_thread.is_some() {
-            let last = state.last_fpu_thread.as_ref().unwrap();
+        if let Some(last) = self.last_fpu_thread.get_cloned().take() {
             last.store_fpu_context();
 
             if current.id() != last.id() {
@@ -766,7 +794,7 @@ impl Scheduler {
             current.restore_fpu_context();
         }
 
-        state.last_fpu_thread = Some(current);
+        self.last_fpu_thread.set(Some(current));
     }
 
     /// Checks whether the current core should balance its threads.
@@ -812,9 +840,9 @@ impl Scheduler {
                         // If so, we need to reset `last_fpu_thread` to None.
                         // We do not need to store the FPU context of the migrating thread,
                         // as we always take a thread from the ready queue and never the current thread.
-                        if state.last_fpu_thread.is_some() {
-                            if state.last_fpu_thread.as_ref().unwrap().id() == thread.id() {
-                                state.last_fpu_thread = None;
+                        if let Some(last) = self.last_fpu_thread.get_cloned().take() {
+                            if last.id() == thread.id() {
+                                self.last_fpu_thread.set(None);
                             }
                         }
                         let _tid = thread.id();
@@ -907,19 +935,6 @@ impl Scheduler {
         state
     }
 
-    /// Description: Helper function returning `ReadyState` and `Map` of scheduler, each in a MutexGuard
-    /// switches Thread on fail, loops back after
-    fn get_ready_state_and_join_map(&self) -> (MutexGuard<'_, ReadyState>, MutexGuard<'_, Map<usize, Vec<Arc<Thread>>>>) {
-        loop {
-            let ready_state = self.get_ready_state();
-            if let Some(join_map) = self.join_map.try_lock() {
-                return (ready_state, join_map);
-            } else {
-                self.switch_thread_no_interrupt();
-            }
-        }
-    }
-
     /// For ps command - get all processes & threads
     pub fn get_status(&self, buffer: &mut [u8]) -> Result<usize, Errno> {
         let mut out = String::new();
@@ -935,10 +950,21 @@ impl Scheduler {
         }
 
         // Sleep List
-        let _ = writeln!(out, "(sleeping threads not listed: LockFreeList has no iteration support)");
+        let myhprec = self.current_thread().hp_record::<Node<SleepEntry>>();
+        self.sleep_list.for_each(|entry| {
+            let sleep_entry_thread_id = entry.thread_id;
+            let sleep_entry_pid = entry.thread.process().id();
+            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", sleep_entry_pid, sleep_entry_thread_id, entry.thread.state(), entry.thread.process().name());
 
+        }, myhprec);
+        
         // Block list
-        let _ = writeln!(out, "(blocked threads not listed: LockFreeList has no iteration support)");
+        let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
+        self.blocked_list.for_each(|entry| {
+            let blocked_entry_thread_id = entry.thread_id;
+            let blocked_entry_pid = entry.thread.process().id();
+            let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", blocked_entry_pid, blocked_entry_thread_id, entry.thread.state(), entry.thread.process().name());
+        }, myhprec);
 
         // Copy to caller buffer (truncate if needed)
         let bytes = out.as_bytes();
@@ -952,15 +978,19 @@ impl Scheduler {
         match cmd {
             // Wake local join-waiters and add to readyQueue
             MessageCmd::JoinTargetExited { tid } => {
-                let mut join_map = self.join_map.lock();
+                let myhprec = self.current_thread().hp_record::<Node<JoinEntry>>();
 
-                if let Some(join_list) = join_map.get_mut(&tid) {
-                    for waiter in join_list.drain(..) {
-                        waiter.set_state(ThreadState::Running);
-                        state.ready_queue.push_front(waiter);
+                if let Some(entry) = self.join_map.find_and_remove(|e| e.thread_id == tid, myhprec) {
+                    let joiner_hprec = self.current_thread().hp_record::<Node<Joiner>>();
+                    while let Some(waiter) = entry.joiners.pop_front_if(
+                        Joiner { thread_id: 0, thread: self.idle_thread.clone() },
+                        |_| true,
+                        joiner_hprec,
+                    ) {
+                        waiter.thread.set_state(ThreadState::Running);
+                        state.ready_queue.push_front(waiter.thread);
                         inc_rq_len();
                     }
-                    join_map.remove(&tid);
                 }
             }
             // If the thread is locally blocked, requeue it.

@@ -20,6 +20,8 @@ static NEXT_FUNCTION_ID: AtomicUsize = AtomicUsize::new(0);
 /// These are functions to be spawned in new threads.
 static FUNCTIONS: Mutex<BTreeMap<usize, Box<dyn FnOnce() + Send + 'static>>> = Mutex::new(BTreeMap::new());
 
+// For the benchmark demo (join)
+#[derive(Copy, Clone)]
 pub struct Thread {
     id: usize,
 }
