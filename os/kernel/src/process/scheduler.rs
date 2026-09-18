@@ -173,32 +173,16 @@ pub fn cpu_count() -> u32 {
     ACTIVE_CPUS.load(Relaxed)
 }
 
-/// Everything related to the threads in ready state in the scheduler
-pub struct ReadyState {
-    ready_queue: VecDeque<Arc<Thread>>,
-    
-}
-
-impl ReadyState {
-    pub fn new() -> Self {
-        let ready_queue = VecDeque::new();
-        
-        Self {
-            ready_queue,
-        }
-    }
-}
-
 /// Main struct of the scheduler
 pub struct Scheduler {
     current_thread: Cell<Option<Arc<Thread>>>,
-    ready_state: Mutex<ReadyState>,
     sleep_list: LockFreeList<SleepEntry>,
     blocked_list: LockFreeList<BlockedEntry>,
     join_map: LockFreeList<JoinEntry>, // manage which threads are waiting for a thread-id to terminate
     has_started: bool,
 
     // Fields from ReadyState migrated to Scheduler struct
+    ready_queue: Mutex<VecDeque<Arc<Thread>>>,
     last_fpu_thread: Cell<Option<Arc<Thread>>>,
     initialized: AtomicBool,
     idle_thread: Arc<Thread>
@@ -210,7 +194,7 @@ unsafe impl Sync for Scheduler {}
 /// Called from assembly code, after the thread has been switched
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn unlock_scheduler() {
-    unsafe { scheduler().ready_state.force_unlock(); }
+    unsafe { scheduler().ready_queue.force_unlock(); }
 }
 
 impl Scheduler {
@@ -218,9 +202,8 @@ impl Scheduler {
     /// Create and initialize the scheduler.
     pub fn new() -> Self {
         info!("Initializing scheduler for CPU {}", current_core_id());
-        let rs = ReadyState::new();
 
-        let ready_state = Mutex::new(rs);
+        let ready_queue = Mutex::new(VecDeque::new());
         let sleep_list = LockFreeList::new();
         let blocked_list = LockFreeList::new();
         let join_map = LockFreeList::new();
@@ -233,14 +216,14 @@ impl Scheduler {
 
         Self {
             current_thread: Cell::default(),
-            ready_state,
-            sleep_list,
-            blocked_list,
-            join_map,
-            has_started,
-            initialized,
+            sleep_list: sleep_list,
+            blocked_list: blocked_list,
+            join_map: join_map,
+            has_started: has_started,
+            ready_queue: ready_queue,
             last_fpu_thread: Cell::default(),
-            idle_thread,
+            initialized: initialized,
+            idle_thread: idle_thread,
         }
     }
 
@@ -304,7 +287,7 @@ impl Scheduler {
 
     /// Return reference to thread identified by `thread_id`
     pub fn thread(&self, thread_id: usize) -> Option<Arc<Thread>> {
-        self.ready_state.lock().ready_queue
+        self.ready_queue.lock()
             .iter()
             .find(|thread| thread.id() == thread_id)
             .cloned()
@@ -324,8 +307,8 @@ impl Scheduler {
             return;
         }
         self.has_started = true;
-        let mut state = self.get_ready_state();
-        let next_thread = state.ready_queue.pop_back()
+        let mut ready_queue = self.get_ready_queue();
+        let next_thread = ready_queue.pop_back()
             .unwrap_or_else(|| self.idle_thread.clone());
         let old = self.current_thread.replace(Some(next_thread.clone()));
         assert!(old.is_none());
@@ -343,14 +326,14 @@ impl Scheduler {
             self.join_map.insert(JoinEntry::new(id), myhprec);
         }
 
-        let mut state = self.get_ready_state();
+        let mut ready_queue = self.get_ready_queue();
         inc_rq_len();
-        state.ready_queue.push_front(thread);
+        ready_queue.push_front(thread);
     }
 
     /// Put calling thread to sleep for `ms` milliseconds
     pub fn sleep(&self, ms: usize) {
-        let state = self.get_ready_state();
+        let ready_queue = self.get_ready_queue();
 
         if !self.initialized.load(Acquire) {
             // Scheduler is not initialized yet, so this function has been called during the boot process
@@ -368,13 +351,13 @@ impl Scheduler {
             self.sleep_list.insert(SleepEntry { wakeup_time, thread_id, thread }, myhprec);
 
             dec_rq_len();
-            self.block_and_switch(state);
+            self.block_and_switch(ready_queue);
         }
     }
 
     /// Put calling thread to block
     pub fn block(&self) {
-        let state = self.get_ready_state();
+        let ready_queue = self.get_ready_queue();
 
         if !self.initialized.load(Acquire) {
             // Scheduler is not initialized yet, so this function has been called during the boot process
@@ -391,18 +374,18 @@ impl Scheduler {
             self.blocked_list.insert(BlockedEntry { pid, thread_id, thread }, myhprec);
             //info!("Scheduler::block: switch to next thread");
             dec_rq_len();
-            self.block_and_switch(state);
+            self.block_and_switch(ready_queue);
         }
     }
 
     /// Requeue thread with `tid` from process with `pid` to the ready queue of the scheduler
     pub fn deblock(&self, pid: Uuid, tid: usize) {
-        let mut state = self.ready_state.lock();
+        let mut ready_queue = self.ready_queue.lock();
 
         let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
         if let Some(entry) = self.blocked_list.find_and_remove(|e| e.thread_id == tid && e.pid == pid, myhprec) {
             entry.thread.set_state(ThreadState::Ready);
-            state.ready_queue.push_front(entry.thread);
+            ready_queue.push_front(entry.thread);
             inc_rq_len();
         } else {
             schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock {pid, tid}))
@@ -426,7 +409,7 @@ impl Scheduler {
             return Err(Errno::ESRCH);
         }
 
-        let state = self.get_ready_state();
+        let ready_queue = self.get_ready_queue();
         let thread = self.current_thread();
         thread.set_state(ThreadState::Blocked);
 
@@ -438,11 +421,11 @@ impl Scheduler {
         });
 
         dec_rq_len();
-        self.block_and_switch(state);
+        self.block_and_switch(ready_queue);
         Ok(0)
     }
 
-    fn unjoin(&self, thread_id: usize, ready_state: &mut ReadyState) {
+    fn unjoin(&self, thread_id: usize, ready_queue: &mut VecDeque<Arc<Thread>>) {
         let myhprec = self.current_thread().hp_record::<Node<JoinEntry>>();
 
         if let Some(entry) = self.join_map.find_and_remove(|e| e.thread_id == thread_id, myhprec) {
@@ -454,7 +437,7 @@ impl Scheduler {
                 joiner_hprec,
             ) {
                 joiner.thread.set_state(ThreadState::Running);
-                ready_state.ready_queue.push_front(joiner.thread);
+                ready_queue.push_front(joiner.thread);
                 inc_rq_len();
             }
         }
@@ -463,17 +446,17 @@ impl Scheduler {
 
     /// Exit calling thread.
     pub fn exit(&self) -> ! {
-        let mut ready_state = self.get_ready_state();
+        let mut ready_queue = self.get_ready_queue();
         let current = self.current_thread();
         current.set_state(ThreadState::Exited);
 
         // Mark dead globally *before* waking joiners, so joiners racing in will observe "dead"
         mark_thread_dead(current.id());
-        self.unjoin(current.id(), &mut ready_state);
+        self.unjoin(current.id(), &mut ready_queue);
 
         dec_rq_len();
         drop(current); // Decrease Rc manually, because block() does not return
-        self.block_and_switch(ready_state);
+        self.block_and_switch(ready_queue);
         unreachable!()
     }
 
@@ -486,7 +469,7 @@ impl Scheduler {
             panic!("A thread cannot kill itself!");
         }
 
-        if self.kill_locally(thread_id, &mut self.get_ready_state()) == false {
+        if self.kill_locally(thread_id, &mut self.get_ready_queue()) == false {
             schedule_on_all_others(MessageItem::Cmd(MessageCmd::Kill {tid: thread_id}))
         }
     }
@@ -494,14 +477,14 @@ impl Scheduler {
     /// Kill the thread with the id `thread_id`, if it is on the same Core
     /// goes through ready_queue, sleep_list, blocked_list, and join_map in this order
     /// returns true if a thread with the given id was found
-    fn kill_locally(&self, thread_id: usize, state: &mut ReadyState) -> bool {
+    fn kill_locally(&self, thread_id: usize, ready_queue: &mut VecDeque<Arc<Thread>>) -> bool {
         if is_thread_alive(thread_id) == false { return true; }
         let mut changed = false;
 
         // check ready_queue
-        let before = state.ready_queue.len();
-        state.ready_queue.retain(|thread| thread.id() != thread_id);
-        let after = state.ready_queue.len();
+        let before = ready_queue.len();
+        ready_queue.retain(|thread| thread.id() != thread_id);
+        let after = ready_queue.len();
         if before != after {
             changed = true;
             dec_rq_len();
@@ -533,14 +516,14 @@ impl Scheduler {
         }
         if changed {
             mark_thread_dead(thread_id);
-            self.unjoin(thread_id, state);
+            self.unjoin(thread_id, ready_queue);
         }
         changed
     }
 
     /// Gives out current thread id, then calls other debug methods
     pub fn debug_scheduler(&self) {
-        let state = self.get_ready_state();
+        let ready_queue = self.get_ready_queue();
 
         let nested = disable_int_nested();
         let id = current_core_id();
@@ -551,7 +534,7 @@ impl Scheduler {
         info!("Scheduler{}: total_threads: {}, own_threads: {}, cpus: {}",
                 id, nbr_threads, own_threads, nbr_cpus);
         info!("Scheduler {}: Ready queue:", id);
-        for thread in &state.ready_queue {
+        for thread in ready_queue.iter() {
             info!("  - {}", thread.id());
         }
         info!("Scheduler {}: Sleep list: (not iterable - LockFreeList has no iteration/dump support)", id);
@@ -563,29 +546,28 @@ impl Scheduler {
 
     /// Debugging function to print all threads in the ready queue.
     pub fn debug_ready_queue(&self) {
-        let state = self.get_ready_state();
+        let ready_queue = self.get_ready_queue();
         let id = current_core_id();
         info!("Scheduler {}: Ready queue:", id);
-        for thread in &state.ready_queue {
+        for thread in ready_queue.iter() {
             info!("  - {}", thread.id());
         }
     }
 
     /// Debugging function to print all threads in the sleep list.
     pub fn debug_sleep_list(&self) {
-        let _state_guard = self.get_ready_state();
         let id = current_core_id();
         info!("Scheduler {}: Sleep list: (not iterable - LockFreeList has no iteration/dump support)", id);
     }
 
     /// Block calling thread and switch to next ready thread.
-    fn block_and_switch(&self, mut state: MutexGuard<ReadyState>) {
-        let mut next_thread = state.ready_queue.pop_back();
+    fn block_and_switch(&self, mut ready_queue: MutexGuard<VecDeque<Arc<Thread>>>) {
+        let mut next_thread = ready_queue.pop_back();
 
         if next_thread.is_none() {
-            self.check_sleep_list(&mut state);
-            drain_inbox_into_ready(10, &mut state);
-            next_thread = state.ready_queue.pop_back();
+            self.check_sleep_list(&mut ready_queue);
+            drain_inbox_into_ready(10, &mut ready_queue);
+            next_thread = ready_queue.pop_back();
             if next_thread.is_none() {  //still no new thread => switch to idle
                 next_thread = Some(Arc::clone(&self.idle_thread));
             }
@@ -628,7 +610,7 @@ impl Scheduler {
     where
         F: FnMut() -> bool,
     {
-        let state = self.get_ready_state();
+        let ready_queue = self.get_ready_queue();
 
         if !self.initialized.load(Acquire) {
             return;
@@ -655,7 +637,7 @@ impl Scheduler {
         self.blocked_list.insert(BlockedEntry { pid, thread_id, thread: Arc::clone(&thread) }, myhprec);
 
         dec_rq_len();
-        self.block_and_switch(state);
+        self.block_and_switch(ready_queue);
     }
 
     /// Unblock thread with given (pid, tid). \
@@ -664,7 +646,7 @@ impl Scheduler {
        // info!("Unblock: Thread with PID={}, TID={}", pid, tid);
 
         // Synchronize against `thread_switch`
-        let mut state = self.ready_state.lock();
+        let mut ready_queue = self.ready_queue.lock();
 
         // 1) Check if the given thread is in the blocked list -> need to be woken up
         let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
@@ -676,7 +658,7 @@ impl Scheduler {
         if let Some(thread) = blocked_thread {
             // let mut state = self.get_ready_state();
             thread.set_state(ThreadState::Ready);
-            state.ready_queue.push_front(Arc::clone(&thread));
+            ready_queue.push_front(Arc::clone(&thread));
             inc_rq_len();
             return true;
         }
@@ -690,7 +672,7 @@ impl Scheduler {
             }
 
         // 2b) Check if the thread to be woken up is in the ready queue
-            if state.ready_queue.iter().any(|t| t.id() == tid && t.process().id() == pid) {
+            if ready_queue.iter().any(|t| t.id() == tid && t.process().id() == pid) {
                 // Already runnable (e.g. a previous wakeup raced in); nothing to do
                 return true;
             }
@@ -702,7 +684,7 @@ impl Scheduler {
         // does the matching `inc_rq_len()`. Only broadcast for live threads to
         // avoid waking stale (exited) waiters.
         if is_thread_alive(tid) {
-            drop(state); // release ready_state before cross-core scheduling
+            drop(ready_queue); // release ready_queue before cross-core scheduling
             schedule_on_all_others(MessageItem::Cmd(MessageCmd::Deblock { pid, tid }));
             return true;
         }
@@ -713,18 +695,18 @@ impl Scheduler {
     /// Switch from current to next thread (from ready queue). \
     /// If `interrupt` is true, the function is called from an ISR and will send EOI to APIC otherwise not.
     fn switch_thread(&self, interrupt: bool) {
-        if let Some(mut state) = self.ready_state.try_lock() {
+        if let Some(mut ready_queue) = self.ready_queue.try_lock() {
             if !self.initialized.load(Acquire) {
                 if interrupt { apic().end_of_interrupt(); }
                 return;
             }
 
-            self.check_sleep_list(&mut state);
-            drain_inbox_into_ready(10, &mut state);
+            self.check_sleep_list(&mut ready_queue);
+            drain_inbox_into_ready(10, &mut ready_queue);
 
             // Check if this core has too many threads running
             if read_resched_flag() || self.should_balance_now() {
-                self.balance_once(&mut state);
+                self.balance_once(&mut ready_queue);
             }
 
             // Get clone of the current thread
@@ -740,7 +722,7 @@ impl Scheduler {
             }
 
             // Try to get the next thread from the ready queue
-            let next = match state.ready_queue.pop_back() {
+            let next = match ready_queue.pop_back() {
                 Some(thread) => thread,
                 None => {
                     if interrupt {
@@ -762,7 +744,7 @@ impl Scheduler {
 
             // last!=idle => we need to enqueue it back in the readyQueue
             if current_was_idle == false {
-                state.ready_queue.push_front(current);
+                ready_queue.push_front(current);
             }
 
             if interrupt {
@@ -813,7 +795,7 @@ impl Scheduler {
     /// Balances the threads on the current core by moving one thread from the tail to the target core.
     /// Target core is the core with the least number of threads.
     /// Returns the new state of the scheduler. (needed for mutable access)
-    fn balance_once(&self, state: &mut ReadyState) {
+    fn balance_once(&self, ready_queue: &mut VecDeque<Arc<Thread>>) {
         let own_load = read_rq_len() as usize;
         if own_load <= 1 {
             //debug!("Scheduler: Cannot balance, current load ({:?}) is too low!", own_load);
@@ -825,14 +807,14 @@ impl Scheduler {
                 let amount = ((own_load-target_load)/4)+1;
                 for _ in 0..amount {
                     // Move one thread from the tail to the target
-                    let thread_opt = state.ready_queue.pop_front();
+                    let thread_opt = ready_queue.pop_front();
                     if let Some(thread) = thread_opt {
                         // If we can't migrate this thread, skip it.
                         // This makes us migrate one less thread than we wanted,
                         // but this should be okay in general.
                         if !thread.can_migrate() {
                             info!("cannot migrate {thread:?}, skipping");
-                            state.ready_queue.push_back(thread);
+                            ready_queue.push_back(thread);
                             continue;
                         }
 
@@ -901,7 +883,7 @@ impl Scheduler {
         }
     }
 
-    fn check_sleep_list(&self, state: &mut ReadyState) {
+    fn check_sleep_list(&self, ready_queue: &mut VecDeque<Arc<Thread>>) {
         let time = timer().systime_ms();
         let myhprec = self.current_thread().hp_record::<Node<SleepEntry>>();
 
@@ -910,29 +892,29 @@ impl Scheduler {
             |entry| entry.wakeup_time <= time,
             myhprec,
         ) {
-            state.ready_queue.push_front(entry.thread);
+            ready_queue.push_front(entry.thread);
             inc_rq_len();
         }
     }
 
     /// Helper function returning `ReadyState` of scheduler in a MutexGuard
-    fn get_ready_state(&self) -> MutexGuard<'_, ReadyState> {
-        let state;
+    fn get_ready_queue(&self) -> MutexGuard<'_, VecDeque<Arc<Thread>>> {
+        let rq;
 
         // We need to make sure, that both the kernel memory manager and the ready queue are currently not locked.
         // Otherwise, a deadlock may occur: Since we are holding the ready queue lock,
         // the scheduler won't switch threads anymore, and none of the locks will ever be released
         loop {
-            let state_tmp = self.ready_state.lock();
+            let rq_tmp = self.ready_queue.lock();
             if allocator().is_locked() {    //allocator can be locked again, but only on other cores -> no deadlock, but bottleneck
                 continue;
             }
 
-            state = state_tmp;
+            rq = rq_tmp;
             break;
         }
 
-        state
+        rq
     }
 
     /// For ps command - get all processes & threads
@@ -944,8 +926,8 @@ impl Scheduler {
         let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", cur.process().id(), cur.id(), ThreadState::Running, cur.process().name());
 
         // Ready Queue
-        let state = self.get_ready_state();
-        for thread in state.ready_queue.iter() {
+        let ready_queue = self.get_ready_queue();
+        for thread in ready_queue.iter() {
             let _ = writeln!(out, "PID: {}, TID: {}, State: {:?}, Name: {}", thread.process().id(), thread.id(), thread.state(), thread.process().name());
         }
 
@@ -974,7 +956,7 @@ impl Scheduler {
     }
 
     /// Handle a command received via inbox, using the already-held ready_state lock (`state`).
-    fn handle_inbox_cmd(&self, cmd: MessageCmd, state: &mut ReadyState) {
+    fn handle_inbox_cmd(&self, cmd: MessageCmd, ready_queue: &mut VecDeque<Arc<Thread>>) {
         match cmd {
             // Wake local join-waiters and add to readyQueue
             MessageCmd::JoinTargetExited { tid } => {
@@ -988,7 +970,7 @@ impl Scheduler {
                         joiner_hprec,
                     ) {
                         waiter.thread.set_state(ThreadState::Running);
-                        state.ready_queue.push_front(waiter.thread);
+                        ready_queue.push_front(waiter.thread);
                         inc_rq_len();
                     }
                 }
@@ -1000,7 +982,7 @@ impl Scheduler {
                 let myhprec = self.current_thread().hp_record::<Node<BlockedEntry>>();
                 if let Some(entry) = self.blocked_list.find_and_remove(|e| e.thread_id == tid && e.pid == pid, myhprec) {
                     entry.thread.set_state(ThreadState::Running);
-                    state.ready_queue.push_front(entry.thread);
+                    ready_queue.push_front(entry.thread);
                     inc_rq_len();
                 }
             }
@@ -1013,7 +995,7 @@ impl Scheduler {
                     let _ = schedule_on_all_others(MessageItem::Cmd(MessageCmd::Kill { tid }));    //if target migrates until then
                     return;
                 }
-                self.kill_locally(tid, state);
+                self.kill_locally(tid, ready_queue);
             }
         }
     }
@@ -1025,7 +1007,7 @@ impl Scheduler {
     /// - Must be called when it is safe to switch (no stack locks, tss not locked).
     /// - Does not change Parking/Blocked semantics; caller should set state beforehand if needed.
     pub fn yield_now(&self) {
-        let mut state = self.get_ready_state();
+        let mut ready_queue = self.get_ready_queue();
 
         if !self.initialized.load(Acquire) {
             return;
@@ -1041,16 +1023,16 @@ impl Scheduler {
 
         // If there is nobody else runnable, don't bother.
         // (Note: ready_queue does NOT include the current thread yet.)
-        if state.ready_queue.is_empty() {
+        if ready_queue.is_empty() {
             return;
         }
 
         // Requeue current as Ready
         current.set_state(ThreadState::Ready);
-        state.ready_queue.push_front(Arc::clone(&current));
+        ready_queue.push_front(Arc::clone(&current));
 
         // Pick next
-        let next = match state.ready_queue.pop_back() {
+        let next = match ready_queue.pop_back() {
             Some(t) => t,
             None => {
                 // Shouldn't happen because we checked !empty, but be safe
@@ -1188,19 +1170,19 @@ pub fn schedule_on_all_others(item: MessageItem) {
 
 /// drains the inbox from the cls into the ready queue; 10 items max per call
 /// automatically calls inc_rq_len()
-pub fn drain_inbox_into_ready(max: usize, state: &mut ReadyState) {
+pub fn drain_inbox_into_ready(max: usize, ready_queue: &mut VecDeque<Arc<Thread>>) {
     let mut drained_threads = 0usize;
     for _ in 0..max {
         match cls().try_recv() {
             Ok(Some(item)) => match item {
                 MessageItem::Thread(thread) => {
 
-                    state.ready_queue.push_front(thread);
+                    ready_queue.push_front(thread);
                     inc_rq_len();
                     drained_threads += 1;
                 }
                 MessageItem::Cmd(cmd) => {
-                    scheduler().handle_inbox_cmd(cmd, state);
+                    scheduler().handle_inbox_cmd(cmd, ready_queue);
                 }
             },
             Ok(None) => {
