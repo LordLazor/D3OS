@@ -46,7 +46,7 @@ use thingbuf::mpsc::{Sender};
 use crate::device::apic::get_apic_id;
 use crate::device::cpu::{disable_int_nested, enable_int_nested};
 use crate::process::core_local_storage::{cls, current_core_id, scheduler, tss_static};
-use crate::collections::lock_free_list_with_hp::{LockFreeList, Node};
+use lockfree::lock_free_list_with_hp::{LockFreeList, Node};
 
 #[derive(Clone)]
 struct SleepEntry {

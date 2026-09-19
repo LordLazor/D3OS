@@ -15,7 +15,7 @@ use core::{ptr, sync::atomic::{AtomicPtr, Ordering::SeqCst}};
 
 use alloc::boxed::Box;
 
-use crate::collections::hazard_pointers::{HPRecType, retire_node};
+use crate::hazard_pointers::{HPRecType, retire_node};
 
 // structure NodeType { Key: KeyType; Data: DataType; Prev: **NodeType; Next: *NodeType; }
 pub struct NodeType<KeyType, DataType> {
@@ -103,7 +103,7 @@ fn reader_search<KeyType: PartialEq, DataType: Clone, const HP_BASE: usize>(head
             let next = unsafe { (*cur).next.load(SeqCst) };
 
             // ckey = cur^.Key;
-            let ckey = unsafe { (*cur).key.as_ref() };
+            // let ckey = unsafe { (*cur).key.as_ref() }; // Not needed as used directly in the next line
 
             // if (cur^.Key == key) {
             if unsafe { (*cur).key.as_ref() } == Some(&key) {

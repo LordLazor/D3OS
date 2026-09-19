@@ -1,0 +1,17 @@
+[package]
+edition = "2024"
+name = "lockfree"
+version = "0.1.0"
+authors = ["Lazar Konstantinou <lazar.konstantinou@hhu.de>"]
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[dependencies]
+# Local dependencies
+# syscall = { path = "../syscall" }
+
+# External depencies
+# log = "0.4.26"

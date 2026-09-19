@@ -14,15 +14,15 @@ use core::{ptr, sync::atomic::{AtomicPtr, Ordering::SeqCst}};
 
 use alloc::boxed::Box;
 
-use crate::collections::hazard_pointers::{HPRecType, retire_node};
+use crate::hazard_pointers::{HPRecType, retire_node};
 
 // structure NodeType { Data: DataType; Next: *NodeType; }
-pub(crate) struct NodeType<DataType> {
+pub struct NodeType<DataType> {
     data: Option<DataType>,
     next: AtomicPtr<NodeType<DataType>>
 }
 
-pub(crate) struct LockFreeQueue<DataType, const HP_BASE: usize = 0> {
+pub struct LockFreeQueue<DataType, const HP_BASE: usize = 0> {
     // Shared Variables
     // Head, Tail, *NodeType;
     head: AtomicPtr<NodeType<DataType>>,

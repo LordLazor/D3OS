@@ -28,15 +28,15 @@ const K: usize = 4;
 // Hazard pointer record
 // structure HPRecType { HP[K]: *NodeType; Next: *HPRecType; }
 #[repr(C)]
-pub(crate) struct HPRecType<NodeType> {
-    pub(crate) hp: [AtomicPtr<NodeType>; K], // HP[K]: array of K hazard pointers - pub(crate) so callers can set hp0/hp1 themselves (e.g. in search()'s Find translation)
+pub struct HPRecType<NodeType> {
+    pub hp: [AtomicPtr<NodeType>; K], // HP[K]: array of K hazard pointers
     next: AtomicPtr<HPRecType<NodeType>>, // Next: pointer to the next hazard pointer record
     active: AtomicBool, // Active: Boolean - true while some thread owns/uses this record
     rlist: Vec<RetiredNode>, // rlist:  retired list of nodes to be freed - see RetiredNode for why this isn't just Vec<*mut NodeType>
     rcount: usize, // rcount: count of retired nodes
    }
 
-pub(crate) struct RetiredNode {
+pub struct RetiredNode {
     ptr: *mut (),
     drop_fn: unsafe fn(*mut ()),
 }
@@ -52,7 +52,7 @@ static HEAD_HPREC: AtomicPtr<HPRecType<()>> = AtomicPtr::new(core::ptr::null_mut
 static H: AtomicUsize = AtomicUsize::new(0);
 
 // AllocateHPRec() {
-pub(crate) fn allocate_hprec() -> *mut HPRecType<()> {
+pub fn allocate_hprec() -> *mut HPRecType<()> {
    // First try to reuse a retired HP record
    // for (hprec = HeadHPRec; hprec != null; hprec = hprec^.Next) {
    let mut hprec = HEAD_HPREC.load(SeqCst);
@@ -116,7 +116,7 @@ pub(crate) fn allocate_hprec() -> *mut HPRecType<()> {
 }
 
 // RetireHPRec() {
-pub(crate) fn retire_hprec<NodeType>(myhprec: *mut HPRecType<NodeType>) {
+pub fn retire_hprec<NodeType>(myhprec: *mut HPRecType<NodeType>) {
    // for (i = 0 to K-1) myhprec^.HP[i] = null;
    for i in 0..K {
       unsafe { (*myhprec).hp[i].store(core::ptr::null_mut(), SeqCst); }
@@ -128,7 +128,7 @@ pub(crate) fn retire_hprec<NodeType>(myhprec: *mut HPRecType<NodeType>) {
 
 // Per-thread private variable (Fig. 4)
 // myhprec: *HPRecType; // initially null
-pub(crate) fn retire_node<NodeType>(node: *mut NodeType, myhprec: *mut HPRecType<NodeType>) {
+pub fn retire_node<NodeType>(node: *mut NodeType, myhprec: *mut HPRecType<NodeType>) {
    // myhprec^.rlist.push(node);
    unsafe {
       (*myhprec).rlist.push(RetiredNode {

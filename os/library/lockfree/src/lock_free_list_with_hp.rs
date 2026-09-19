@@ -20,9 +20,10 @@ use core::{ptr, sync::atomic::{AtomicPtr, Ordering::SeqCst}};
 
 use alloc::boxed::Box;
 
-use crate::collections::hazard_pointers::{retire_node, HPRecType};
+use crate::hazard_pointers::{HPRecType, retire_node};
 
-pub(crate) struct Node<KeyType> {
+
+pub struct Node<KeyType> {
     key: Option<KeyType>,
     next: AtomicPtr<Node<KeyType>>
 }
